@@ -1,0 +1,25 @@
+time_mode:
+  module: i1_timemode
+  class: TimeMode
+  morning_start: '05:30:00'
+  night_start: '23:30:00'
+  scenes:
+    test_on:
+      test: true
+    test_off:
+      test: false
+    night:
+      specific_lightning: false
+      general_lightning: false
+      night_lightning: true
+    morning:
+      general_lightning: true
+      night_lightning: true
+    day:
+      general_lightning: false
+      night_lightning: false
+    evening:
+      general_lightning: true
+      night_lightning: true
+
+
