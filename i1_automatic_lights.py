@@ -72,7 +72,7 @@ class AutomaticLights(hass.Hass):
         if scene is None:
             return
 
-        self.activate_scene(scene.replace("scene.", ""))
+        self.activate_scene(scene.replace("scene.", ""), True)
 
     def get_groups(self):
         """
@@ -149,7 +149,7 @@ class AutomaticLights(hass.Hass):
         if now > night_start:
             return "night"
 
-    def start_morning(self, kwargs):
+    def start_morning(self, _kwargs):
         """
         Start the morning scene.
 
@@ -165,7 +165,7 @@ class AutomaticLights(hass.Hass):
         self.log("morning_start()")
         self.activate_scene("morning")
 
-    def start_day(self, kwargs):
+    def start_day(self, _kwargs):
         """
         Start the day scene.
 
@@ -177,7 +177,7 @@ class AutomaticLights(hass.Hass):
         self.log("day_start()")
         self.activate_scene("day")
 
-    def start_evening(self, kwargs):
+    def start_evening(self, _kwargs):
         """
         Start the evening scene.
 
@@ -192,7 +192,7 @@ class AutomaticLights(hass.Hass):
         self.log("evening_start()")
         self.activate_scene("evening")
 
-    def start_night(self, kwargs):
+    def start_night(self, _kwargs):
         """
         Start the night scene.
 
@@ -204,7 +204,7 @@ class AutomaticLights(hass.Hass):
         self.log("night_start()")
         self.activate_scene("night")
 
-    def activate_scene(self, scene_name):
+    def activate_scene(self, scene_name, run_now=False):
         """
         Activate a specific scene by controlling group entities.
 
@@ -213,6 +213,7 @@ class AutomaticLights(hass.Hass):
 
         Args:
             scene_name: Name of the scene to activate
+            run_now: If True, execute immediately instead of with delay
         """
         self.log("activate_scene({})".format(scene_name))
         self.current_state = scene_name
@@ -222,14 +223,18 @@ class AutomaticLights(hass.Hass):
         for group_name in self.scenes.get(scene_name, {}):
             group_state = self.scenes.get(scene_name, {}).get(group_name)
             self.log("name: {} state: {}".format(group_name, group_state))
-            entities = self.groups.get("group.{}".format(group_name))
-            self.log("entities: {}".format(json.dumps(entities)))
-            if entities is None:
-                self.log("ERROR: No entities for group {} and scene {}".format(group_name, scene_name))
-                return
-            for entity in entities:
-                self.log("Turning entity {}".format(entity))
-                self.run_in(self._turn_onoff, 0, random_start=0, random_end=600, entity=entity, state=group_state)
+            if run_now:
+                self.log("Turning group {} -> {} now".format(group_name, group_state))
+                self._turn_onoff({"entity": group_name, "state": group_state})
+            else:
+                entities = self.groups.get("group.{}".format(group_name))
+                self.log("entities: {}".format(json.dumps(entities)))
+                if entities is None:
+                    self.log("ERROR: No entities for group {} and scene {}".format(group_name, scene_name))
+                    return
+                for entity in entities:
+                    self.log("Turning entity {}".format(entity))
+                    self.run_in(self._turn_onoff, 0, random_start=0, random_end=600, entity=entity, state=group_state)
 
     def _turn_onoff(self, kwargs):
         """
