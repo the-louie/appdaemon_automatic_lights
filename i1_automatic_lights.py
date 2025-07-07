@@ -47,7 +47,7 @@ class AutomaticLights(hass.Hass):
         self.scenes = self.args.get("scenes", {})
 
         # sun position events
-        self.listen_state(self.sun_pos, 'sun.sun')
+        self.listen_state(self.sun_pos, "sensor.sun_solar_elevation")
 
         # manual scene events
         self.listen_event(self.manual_scene, event='call_service', domain='scene')
@@ -103,17 +103,17 @@ class AutomaticLights(hass.Hass):
             kwargs: Additional keyword arguments
         """
         self.log("sun_pos(self, {}, {}, {} -> {}, kwargs)".format(entity, json.dumps(attribute), old, new))
-        current_elevation = self.get_state("sun.sun", attribute="elevation")
-        is_rising = self.get_state("sun.sun", attribute="is_rising")
+        current_elevation = float(self.get_state("sensor.sun_solar_elevation"))
+        is_rising = self.get_state("sun.sun", attribute="rising")
+        light_level = float(self.get_state(self.solar_radiation.get("sensor"), attribute="state"))
+        self.log("sun_pos() current_elevation={} is_rising={} light_level={}".format(current_elevation, is_rising, light_level))
 
         # if it's morning and the has risen fully, it's day
         if self.current_state == "morning" and is_rising and current_elevation > 3:
-            light_level = self.get_state(self.solar_radiation.get("sensor"), attribute="state")
             if light_level > self.solar_radiation.get("threshold"):
                 self.start_day(None)
 
         elif self.current_state == "day" and not is_rising:
-            light_level = self.get_state(self.solar_radiation.get("sensor"), attribute="state")
             if light_level < self.solar_radiation.get("threshold") or current_elevation < 3:
                 self.start_evening(None)
 
