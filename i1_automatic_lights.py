@@ -31,16 +31,19 @@ class AutomaticLights(hass.Hass):
         if not self.night_start:
             self.log("night_start is required, format: %H:%M:%S")
 
-        # Add solar radiation configuration
+        # Add solar radiation configuration (optional)
         self.solar_radiation = self.args.get("solar_radiation")
-        if not self.solar_radiation:
-            self.log("solar_radiation is required")
-            exit(1)
+        if self.solar_radiation:
+            self.log("Solar radiation monitoring enabled")
+        else:
+            self.log("Solar radiation monitoring disabled - using time and sun position only")
 
+        # Initialize state tracking
         self.current_state = self.calculate_state()
 
-        # Enumerate groups
+        # Initialize group cache with timeout
         self.groups = {}
+        self.groups_cache_time = None
         self.get_groups()
 
         # Get Scenes
@@ -79,14 +82,19 @@ class AutomaticLights(hass.Hass):
         Retrieve and cache all Home Assistant groups.
 
         Populates self.groups with group names mapped to their entity lists.
+        Cache expires after 6 hours.
         """
         self.log("get_groups()")
-        state_groups = self.get_state("group")
+        state_groups = self._get_safe_state("group", log_name="Groups")
+        if state_groups is None:
+            return
+
         self.log(" * state_groups = {}".format(state_groups))
         self.groups = {}
         for key, val in state_groups.items():
             self.groups[key] = val.get("attributes", {}).get("entity_id", [])
             self.log(" - * group '{}' = '{}'".format(key, self.groups[key]))
+        self.groups_cache_time = self.time()
 
     def sun_pos(self, entity, attribute, old, new, kwargs):
         """
@@ -103,19 +111,50 @@ class AutomaticLights(hass.Hass):
             kwargs: Additional keyword arguments
         """
         self.log("sun_pos(self, {}, {}, {} -> {}, kwargs)".format(entity, json.dumps(attribute), old, new))
-        current_elevation = float(self.get_state("sensor.sun_solar_elevation"))
-        is_rising = self.get_state("sun.sun", attribute="rising")
-        light_level = float(self.get_state(self.solar_radiation.get("sensor"), attribute="state"))
-        self.log("sun_pos() current_elevation={} is_rising={} light_level={}".format(current_elevation, is_rising, light_level))
 
-        # if it's morning and the has risen fully, it's day
-        if self.current_state == "morning" and is_rising and current_elevation > 3:
-            if light_level > self.solar_radiation.get("threshold"):
-                self.start_day(None)
+        # Check solar elevation sensor
+        elevation_state = self._get_safe_state("sensor.sun_solar_elevation", log_name="Solar elevation sensor")
+        if elevation_state is None:
+            return
 
-        elif self.current_state == "day" and not is_rising:
-            if light_level < self.solar_radiation.get("threshold") or current_elevation < 3:
-                self.start_evening(None)
+        # Check sun rising attribute
+        rising_state = self._get_safe_state("sun.sun", attribute="rising", log_name="Sun rising attribute")
+        if rising_state is None:
+            return
+
+        try:
+            current_elevation = float(elevation_state)
+            is_rising = rising_state == "true"
+            self.log("sun_pos() current_elevation={} is_rising={}".format(current_elevation, is_rising))
+
+            # Check if solar radiation monitoring is enabled
+            if self.solar_radiation:
+                light_state = self._get_safe_state(self.solar_radiation.get("sensor"), attribute="state", log_name="Light level sensor")
+                if light_state is None:
+                    return
+
+                light_level = float(light_state)
+                self.log("sun_pos() light_level={}".format(light_level))
+
+                # if it's morning and the has risen fully, it's day
+                if self.current_state == "morning" and is_rising and current_elevation > 3:
+                    if light_level > self.solar_radiation.get("threshold"):
+                        self.start_day(None)
+
+                elif self.current_state == "day" and not is_rising:
+                    if light_level < self.solar_radiation.get("threshold") or current_elevation < 3:
+                        self.start_evening(None)
+            else:
+                # Solar radiation disabled - use only elevation and rising status
+                # if it's morning and the sun has risen above 3 degrees, it's day
+                if self.current_state == "morning" and is_rising and current_elevation > 3:
+                    self.start_day(None)
+
+                elif self.current_state == "day" and not is_rising:
+                    self.start_evening(None)
+
+        except (ValueError, TypeError) as e:
+            self.log("Error converting sensor values to float: {}".format(e))
 
     def calculate_state(self):
         """
@@ -134,20 +173,23 @@ class AutomaticLights(hass.Hass):
         night_start = self.parse_time(self.night_start)
 
         # if we're before sunrise and before morning it's night
-        if now < sunrise and now < morning_start:
+        if now <= sunrise and now <= morning_start:
             return "night"
         # if we're after morning but before sunrise it's morning
         if now > morning_start and now < sunrise:
             return "morning"
         # if we're after sunrise but before sunset it's day
-        if now > sunrise and now < sunset:
+        if now >= sunrise and now < sunset:
             return "day"
         # if it's after sunset but before night it's evening
-        if now > sunset and now < night_start:
+        if now >= sunset and now < night_start:
             return "evening"
-        # if it's after night, it's night *doh*
-        if now > night_start:
+        # if it's after night, it's night
+        if now >= night_start:
             return "night"
+
+        # Fallback - should never reach here
+        return "night"
 
     def start_morning(self, _kwargs):
         """
@@ -159,11 +201,11 @@ class AutomaticLights(hass.Hass):
         Args:
             kwargs: Additional keyword arguments
         """
-        if self.sun_up() or self.current_state == "day":
-            self.log("Sun is already up, no morning needed")
-            return
-        self.log("morning_start()")
-        self.activate_scene("morning")
+        def should_skip():
+            sun_state = self.sun_up()
+            return sun_state is None or sun_state or self.current_state == "day"
+
+        self._start_scene("morning", should_skip, "Sun is already up, no morning needed")
 
     def start_day(self, _kwargs):
         """
@@ -174,8 +216,7 @@ class AutomaticLights(hass.Hass):
         Args:
             kwargs: Additional keyword arguments
         """
-        self.log("day_start()")
-        self.activate_scene("day")
+        self._start_scene("day")
 
     def start_evening(self, _kwargs):
         """
@@ -186,11 +227,10 @@ class AutomaticLights(hass.Hass):
         Args:
             kwargs: Additional keyword arguments
         """
-        if self.current_state == "night":
-            self.log("last state was night, no evening needed")
-            return
-        self.log("evening_start()")
-        self.activate_scene("evening")
+        def should_skip():
+            return self.current_state == "night"
+
+        self._start_scene("evening", should_skip, "last state was night, no evening needed")
 
     def start_night(self, _kwargs):
         """
@@ -201,8 +241,7 @@ class AutomaticLights(hass.Hass):
         Args:
             kwargs: Additional keyword arguments
         """
-        self.log("night_start()")
-        self.activate_scene("night")
+        self._start_scene("night")
 
     def activate_scene(self, scene_name, run_now=False):
         """
@@ -219,21 +258,26 @@ class AutomaticLights(hass.Hass):
         self.current_state = scene_name
         self.set_state("irisone.time_state", state=scene_name)
 
-        self.get_groups()
-        for group_name in self.scenes.get(scene_name, {}):
-            group_state = self.scenes.get(scene_name, {}).get(group_name)
+        # Refresh groups if cache is empty or expired (6 hours)
+        cache_age = self.time() - self.groups_cache_time if self.groups_cache_time else float('inf')
+        if not self.groups or cache_age > 6 * 3600:  # 6 hours in seconds
+            self.get_groups()
+        scene_config = self.scenes.get(scene_name, {})
+        for group_name in scene_config:
+            group_state = scene_config.get(group_name)
             self.log("name: {} state: {}".format(group_name, group_state))
-            if run_now:
-                self.log("Turning group {} -> {} now".format(group_name, group_state))
-                self._turn_onoff({"entity": group_name, "state": group_state})
-            else:
-                entities = self.groups.get("group.{}".format(group_name))
-                self.log("entities: {}".format(json.dumps(entities)))
-                if entities is None:
-                    self.log("ERROR: No entities for group {} and scene {}".format(group_name, scene_name))
-                    return
-                for entity in entities:
-                    self.log("Turning entity {}".format(entity))
+
+            entities = self.groups.get("group.{}".format(group_name))
+            self.log("entities: {}".format(json.dumps(entities)))
+            if entities is None:
+                self.log("ERROR: No entities for group {} and scene {}".format(group_name, scene_name))
+                continue
+
+            for entity in entities:
+                self.log("Turning entity {}".format(entity))
+                if run_now:
+                    self._turn_onoff({"entity": entity, "state": group_state})
+                else:
                     self.run_in(self._turn_onoff, 0, random_start=0, random_end=600, entity=entity, state=group_state)
 
     def _turn_onoff(self, kwargs):
@@ -252,4 +296,40 @@ class AutomaticLights(hass.Hass):
             self.turn_on(entity)
         elif not state:
             self.turn_off(entity)
+
+    def _get_safe_state(self, entity, attribute=None, log_name=None):
+        """
+        Safely get state from Home Assistant entity.
+
+        Args:
+            entity: Entity ID to query
+            attribute: Optional attribute to get
+            log_name: Name for logging if unavailable
+
+        Returns:
+            State value or None if unavailable
+        """
+        state = self.get_state(entity, attribute=attribute)
+        if state is None or state == "unavailable":
+            log_msg = log_name or entity
+            self.log("{} unavailable: {}".format(log_msg, state))
+            return None
+        return state
+
+    def _start_scene(self, scene_name, validation_func=None, skip_message=None):
+        """
+        Generic scene starter with optional validation.
+
+        Args:
+            scene_name: Name of the scene to activate
+            validation_func: Optional function that returns True to skip
+            skip_message: Message to log if validation fails
+        """
+        if validation_func and validation_func():
+            if skip_message:
+                self.log(skip_message)
+            return
+
+        self.log("{}_start()".format(scene_name))
+        self.activate_scene(scene_name)
 
