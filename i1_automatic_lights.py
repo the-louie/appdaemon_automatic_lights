@@ -94,7 +94,8 @@ class AutomaticLights(hass.Hass):
         for key, val in state_groups.items():
             self.groups[key] = val.get("attributes", {}).get("entity_id", [])
             self.log(" - * group '{}' = '{}'".format(key, self.groups[key]))
-        self.groups_cache_time = self.time()
+        from datetime import datetime
+        self.groups_cache_time = datetime.now()
 
     def sun_pos(self, entity, attribute, old, new, kwargs):
         """
@@ -259,9 +260,15 @@ class AutomaticLights(hass.Hass):
         self.set_state("irisone.time_state", state=scene_name)
 
         # Refresh groups if cache is empty or expired (6 hours)
-        cache_age = self.time() - self.groups_cache_time if self.groups_cache_time else float('inf')
-        if not self.groups or cache_age > 6 * 3600:  # 6 hours in seconds
+        if not self.groups or not self.groups_cache_time:
             self.get_groups()
+        else:
+            # Calculate cache age using datetime objects
+            from datetime import datetime
+            now = datetime.now()
+            cache_age = (now - self.groups_cache_time).total_seconds()
+            if cache_age > 6 * 3600:  # 6 hours in seconds
+                self.get_groups()
         scene_config = self.scenes.get(scene_name, {})
         for group_name in scene_config:
             group_state = scene_config.get(group_name)
