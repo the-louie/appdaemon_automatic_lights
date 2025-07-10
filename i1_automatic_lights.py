@@ -155,7 +155,8 @@ class AutomaticLights(hass.Hass):
                     self.start_evening(None)
 
         except (ValueError, TypeError) as e:
-            self.log("Error converting sensor values to float: {}".format(e))
+            import traceback
+            self.log("Error converting sensor values to float at line {}: {}".format(traceback.extract_stack()[-1].lineno, e))
 
     def calculate_state(self):
         """
@@ -255,37 +256,41 @@ class AutomaticLights(hass.Hass):
             scene_name: Name of the scene to activate
             run_now: If True, execute immediately instead of with delay
         """
-        self.log("activate_scene({})".format(scene_name))
-        self.current_state = scene_name
-        self.set_state("irisone.time_state", state=scene_name)
+        try:
+            self.log("activate_scene({})".format(scene_name))
+            self.current_state = scene_name
+            self.set_state("irisone.time_state", state=scene_name)
 
-        # Refresh groups if cache is empty or expired (6 hours)
-        if not self.groups or not self.groups_cache_time:
-            self.get_groups()
-        else:
-            # Calculate cache age using datetime objects
-            from datetime import datetime
-            now = datetime.now()
-            cache_age = (now - self.groups_cache_time).total_seconds()
-            if cache_age > 6 * 3600:  # 6 hours in seconds
+            # Refresh groups if cache is empty or expired (6 hours)
+            if not self.groups or not self.groups_cache_time:
                 self.get_groups()
-        scene_config = self.scenes.get(scene_name, {})
-        for group_name in scene_config:
-            group_state = scene_config.get(group_name)
-            self.log("name: {} state: {}".format(group_name, group_state))
+            else:
+                # Calculate cache age using datetime objects
+                from datetime import datetime
+                now = datetime.now()
+                cache_age = (now - self.groups_cache_time).total_seconds()
+                if cache_age > 6 * 3600:  # 6 hours in seconds
+                    self.get_groups()
+            scene_config = self.scenes.get(scene_name, {})
+            for group_name in scene_config:
+                group_state = scene_config.get(group_name)
+                self.log("name: {} state: {}".format(group_name, group_state))
 
-            entities = self.groups.get("group.{}".format(group_name))
-            self.log("entities: {}".format(json.dumps(entities)))
-            if entities is None:
-                self.log("ERROR: No entities for group {} and scene {}".format(group_name, scene_name))
-                continue
+                entities = self.groups.get("group.{}".format(group_name))
+                self.log("entities: {}".format(json.dumps(entities)))
+                if entities is None:
+                    self.log("ERROR: No entities for group {} and scene {}".format(group_name, scene_name))
+                    continue
 
-            for entity in entities:
-                self.log("Turning entity {}".format(entity))
-                if run_now:
-                    self._turn_onoff({"entity": entity, "state": group_state})
-                else:
-                    self.run_in(self._turn_onoff, 0, random_start=0, random_end=600, entity=entity, state=group_state)
+                for entity in entities:
+                    self.log("Turning entity {}".format(entity))
+                    if run_now:
+                        self._turn_onoff({"entity": entity, "state": group_state})
+                    else:
+                        self.run_in(self._turn_onoff, 0, random_start=0, random_end=600, entity=entity, state=group_state)
+        except Exception as e:
+            import traceback
+            self.log("Error in activate_scene at line {}: {}".format(traceback.extract_stack()[-1].lineno, e))
 
     def _turn_onoff(self, kwargs):
         """
@@ -294,15 +299,19 @@ class AutomaticLights(hass.Hass):
         Args:
             kwargs: Dictionary containing 'entity' and 'state' keys
         """
-        entity = kwargs.get("entity")
-        state = kwargs.get("state")
-        self.log("_turn_onoff(self, kwargs): entity={} state={}".format(entity, state))
-        if entity is None or state is None:
-            return
-        if state:
-            self.turn_on(entity)
-        elif not state:
-            self.turn_off(entity)
+        try:
+            entity = kwargs.get("entity")
+            state = kwargs.get("state")
+            self.log("_turn_onoff(self, kwargs): entity={} state={}".format(entity, state))
+            if entity is None or state is None:
+                return
+            if state:
+                self.turn_on(entity)
+            elif not state:
+                self.turn_off(entity)
+        except Exception as e:
+            import traceback
+            self.log("Error in _turn_onoff at line {}: {}".format(traceback.extract_stack()[-1].lineno, e))
 
     def _get_safe_state(self, entity, attribute=None, log_name=None):
         """
@@ -316,12 +325,17 @@ class AutomaticLights(hass.Hass):
         Returns:
             State value or None if unavailable
         """
-        state = self.get_state(entity, attribute=attribute)
-        if state is None or state == "unavailable":
-            log_msg = log_name or entity
-            self.log("{} unavailable: {}".format(log_msg, state))
+        try:
+            state = self.get_state(entity, attribute=attribute)
+            if state is None or state == "unavailable":
+                log_msg = log_name or entity
+                self.log("{} unavailable: {}".format(log_msg, state))
+                return None
+            return state
+        except Exception as e:
+            import traceback
+            self.log("Error in _get_safe_state at line {}: {}".format(traceback.extract_stack()[-1].lineno, e))
             return None
-        return state
 
     def _start_scene(self, scene_name, validation_func=None, skip_message=None):
         """
@@ -332,11 +346,15 @@ class AutomaticLights(hass.Hass):
             validation_func: Optional function that returns True to skip
             skip_message: Message to log if validation fails
         """
-        if validation_func and validation_func():
-            if skip_message:
-                self.log(skip_message)
-            return
+        try:
+            if validation_func and validation_func():
+                if skip_message:
+                    self.log(skip_message)
+                return
 
-        self.log("{}_start()".format(scene_name))
-        self.activate_scene(scene_name)
+            self.log("{}_start()".format(scene_name))
+            self.activate_scene(scene_name)
+        except Exception as e:
+            import traceback
+            self.log("Error in _start_scene at line {}: {}".format(traceback.extract_stack()[-1].lineno, e))
 
