@@ -38,7 +38,7 @@ class AutomaticLights(hass.Hass):
         else:
             self.log("Solar radiation monitoring disabled - using time and sun position only")
 
-        # Initialize state tracking
+        # Initialize state tracking (only called on startup)
         self.current_state = self.calculate_state()
 
         # Initialize group cache with timeout
@@ -99,10 +99,14 @@ class AutomaticLights(hass.Hass):
 
     def sun_pos(self, entity, attribute, old, new, kwargs):
         """
-        Handle sun position state changes.
+        Handle sun position state changes and runtime state transitions.
 
-        Monitors sun elevation and rising status to trigger day/evening transitions
-        based on solar radiation levels.
+        This method handles ALL runtime state transitions based on sensor data.
+        The initial state is set by calculate_state() on startup, but all subsequent
+        transitions (morning->day, day->evening, etc.) are controlled by this method.
+
+        Monitors sun elevation and rising status to trigger transitions based on
+        solar radiation levels and environmental conditions.
 
         Args:
             entity: The sun entity
@@ -126,7 +130,7 @@ class AutomaticLights(hass.Hass):
         try:
             current_elevation = float(elevation_state)
             is_rising = rising_state == "true"
-            self.log("sun_pos() current_elevation={} is_rising={}".format(current_elevation, is_rising))
+            self.log("sun_pos() current_elevation={} is_rising={} current_state={}".format(current_elevation, is_rising, self.current_state))
 
             # Check if solar radiation monitoring is enabled
             if self.solar_radiation:
@@ -135,23 +139,31 @@ class AutomaticLights(hass.Hass):
                     return
 
                 light_level = float(light_state)
-                self.log("sun_pos() light_level={}".format(light_level))
+                threshold = self.solar_radiation.get("threshold")
+                self.log("sun_pos() light_level={} threshold={}".format(light_level, threshold))
 
                 # if it's morning and the has risen fully, it's day
                 if self.current_state == "morning" and is_rising and current_elevation > 3:
-                    if light_level > self.solar_radiation.get("threshold"):
+                    if light_level > threshold:
+                        self.log("Transitioning morning -> day (light_level {} > threshold {})".format(light_level, threshold))
                         self.start_day(None)
 
                 elif self.current_state == "day" and not is_rising:
-                    if light_level < self.solar_radiation.get("threshold") or current_elevation < 3:
+                    if light_level < threshold:
+                        self.log("Transitioning day -> evening (light_level {} < threshold {})".format(light_level, threshold))
+                        self.start_evening(None)
+                    elif current_elevation < 3:
+                        self.log("Transitioning day -> evening (elevation {} < 3)".format(current_elevation))
                         self.start_evening(None)
             else:
                 # Solar radiation disabled - use only elevation and rising status
                 # if it's morning and the sun has risen above 3 degrees, it's day
                 if self.current_state == "morning" and is_rising and current_elevation > 3:
+                    self.log("Transitioning morning -> day (elevation {} > 3, rising)".format(current_elevation))
                     self.start_day(None)
 
                 elif self.current_state == "day" and not is_rising:
+                    self.log("Transitioning day -> evening (not rising, elevation {})".format(current_elevation))
                     self.start_evening(None)
 
         except (ValueError, TypeError) as e:
@@ -160,13 +172,14 @@ class AutomaticLights(hass.Hass):
 
     def calculate_state(self):
         """
-        Calculate the current time-based state.
+        Calculate the initial time-based state on startup only.
 
-        Determines if it's night, morning, day, or evening based on current time
-        relative to sunrise, sunset, and configured start times.
+        Determines the initial state based on current time relative to sunrise,
+        sunset, and configured start times. This is only called during initialization.
+        All subsequent state transitions are handled by sensor-based logic.
 
         Returns:
-            str: Current state ('night', 'morning', 'day', or 'evening')
+            str: Initial state ('night', 'morning', 'day', or 'evening')
         """
         now = self.time()
         sunrise = self.sunrise().time()
