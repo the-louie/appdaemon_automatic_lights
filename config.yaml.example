@@ -1,25 +1,41 @@
-time_mode:
-  module: i1_timemode
-  class: TimeMode
-  morning_start: '05:30:00'
-  night_start: '23:30:00'
+# Automatic Lights - Home Assistant AppDaemon Configuration Example
+# Copyright (c) 2025 the_louie
+
+automatic_lights:
+  module: i1_automatic_lights
+  class: AutomaticLights
+
+  # Time-based configuration
+  morning_start: "05:30"
+  night_start: "23:30"
+
+  # Optional solar radiation configuration
+  solar_radiation:
+    sensor: "sensor.outdoor_light_level"
+    threshold: 500
+    elevation_threshold: 3.0
+
+  # Scene configurations
   scenes:
-    test_on:
-      test: true
-    test_off:
-      test: false
     night:
-      specific_lightning: false
-      general_lightning: false
-      night_lightning: true
+      group.living_room: false
+      group.bedroom: false
+      group.kitchen: true
+      group.hallway: true
     morning:
-      general_lightning: true
-      night_lightning: true
+      group.living_room: true
+      group.bedroom: true
+      group.kitchen: true
+      group.hallway: true
     day:
-      general_lightning: false
-      night_lightning: false
+      group.living_room: false
+      group.bedroom: false
+      group.kitchen: false
+      group.hallway: false
     evening:
-      general_lightning: true
-      night_lightning: true
+      group.living_room: true
+      group.bedroom: false
+      group.kitchen: true
+      group.hallway: true
 
 
