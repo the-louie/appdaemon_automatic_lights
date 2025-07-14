@@ -187,8 +187,9 @@ class AutomaticLights(hass.Hass):
         """
         Initialize state tracking and group caching.
 
-        Sets up the current state based on time calculation and
-        initializes the group cache for efficient entity management.
+        Sets up the current state based on time calculation,
+        initializes the group cache for efficient entity management,
+        and activates the appropriate scene for the calculated state.
         """
         try:
             # Initialize state tracking (only called on startup)
@@ -205,6 +206,13 @@ class AutomaticLights(hass.Hass):
             self.log("State and cache initialized: current_state={}, groups={}, scenes={}".format(
                 self.current_state, len(self.groups), len(self.scenes)
             ))
+
+            # Activate the scene for the calculated initial state
+            if self.current_state in self.scenes:
+                self.log("Activating initial scene for calculated state: {}".format(self.current_state))
+                self.activate_scene(self.current_state, run_now=True)
+            else:
+                self.log("WARNING: No scene configuration found for initial state: {}".format(self.current_state))
 
         except Exception as e:
             self.log("ERROR: Failed to initialize state and cache at line {}: {}".format(
