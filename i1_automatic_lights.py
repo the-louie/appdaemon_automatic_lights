@@ -23,13 +23,16 @@ MAX_RETRIES = 2
 RETRY_DELAY = 0.5
 DEFAULT_MORNING_START = "05:30"
 DEFAULT_NIGHT_START = "23:30"
-RANDOM_DELAY_MINUTES = 10
 RANDOM_DELAY_SECONDS = 600
 SCENE_PREFIX = "scene."
 GROUP_PREFIX = "group."
 TIME_STATE_ENTITY = "irisone.time_state"
 SUN_ELEVATION_SENSOR = "sensor.sun_solar_elevation"
 SUN_RISING_SENSOR = "sensor.sun_solar_rising"
+MORNING_RANDOM_START = -45 * 60  # -45 minutes
+MORNING_RANDOM_END = -30 * 60    # -30 minutes
+NIGHT_RANDOM_START = -15 * 60    # -15 minutes
+NIGHT_RANDOM_END = 10 * 60       # +10 minutes
 
 
 class AutomaticLights(hass.Hass):
@@ -252,8 +255,10 @@ class AutomaticLights(hass.Hass):
         """
         try:
             # Time based events with randomized delays
-            self.run_daily(self.start_morning, self.morning_start, random_start=-45*60, random_end=-30*60)
-            self.run_daily(self.start_night, self.night_start, random_start=-15*60, random_end=10*60)
+            self.run_daily(self.start_morning, self.morning_start,
+                          random_start=MORNING_RANDOM_START, random_end=MORNING_RANDOM_END)
+            self.run_daily(self.start_night, self.night_start,
+                          random_start=NIGHT_RANDOM_START, random_end=NIGHT_RANDOM_END)
 
             self.log("Scheduled events: morning={}, night={}, sunrise={}, sunset={}, state={}".format(
                 self.morning_start, self.night_start,
