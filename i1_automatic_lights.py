@@ -64,7 +64,7 @@ class AutomaticLights(hass.Hass):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-                # Debouncing for state changes to prevent excessive processing
+        # Debouncing for state changes to prevent excessive processing
         self.last_state_change_time = 0
         self.state_change_debounce_seconds = 60  # Minimum 60 seconds between state changes
 
@@ -563,8 +563,14 @@ class AutomaticLights(hass.Hass):
         """
         Retrieve and validate sensor data for sun position calculations.
 
+        This method fetches solar elevation and rising status from Home Assistant
+        sensors and validates the data before returning it for state calculations.
+
         Returns:
             Tuple of (elevation, is_rising) or None if sensors are unavailable
+
+        Raises:
+            ValueError: If sensor data cannot be converted to expected types
         """
         try:
             # Check solar elevation sensor
@@ -577,16 +583,38 @@ class AutomaticLights(hass.Hass):
             if rising_state is None:
                 return None
 
-            # Convert sensor values to appropriate types
-            current_elevation = float(elevation_state)
-            is_rising = rising_state is True
+            # Convert sensor values to appropriate types with validation
+            try:
+                current_elevation = float(elevation_state)
+            except (ValueError, TypeError) as e:
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Failed to convert elevation value '{}' to float at line {}: {}".format(
+                        elevation_state, line_num, e
+                    )
+                )
+                return None
+
+            # Convert rising state to boolean with proper validation
+            if isinstance(rising_state, bool):
+                is_rising = rising_state
+            elif isinstance(rising_state, str):
+                is_rising = rising_state.lower() in ('true', '1', 'yes', 'on')
+            else:
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Invalid rising state type '{}' at line {}: expected bool or string".format(
+                        type(rising_state), line_num
+                    )
+                )
+                return None
 
             return current_elevation, is_rising
 
-        except (ValueError, TypeError) as e:
+        except Exception as e:
             line_num = traceback.extract_stack()[-1].lineno
             self.log(
-                "ERROR: Failed to convert sensor values to float at line {}: {}".format(
+                "ERROR: Failed to retrieve sensor data at line {}: {}".format(
                     line_num, e
                 )
             )
@@ -596,37 +624,99 @@ class AutomaticLights(hass.Hass):
         """
         Process state transitions when solar radiation monitoring is enabled.
 
+        This method handles state transitions based on solar radiation sensor data,
+        elevation thresholds, and sun rising status. It provides precise control
+        over lighting transitions based on actual environmental conditions.
+
         Args:
             current_elevation: Current solar elevation in degrees
             is_rising: Whether the sun is currently rising
+
+        Raises:
+            ValueError: If solar radiation configuration is invalid
         """
         try:
             # Validate solar radiation configuration is available
             if not self.solar_radiation:
+                line_num = traceback.extract_stack()[-1].lineno
                 self.log(
-                    "ERROR: Solar radiation configuration is None"
+                    "ERROR: Solar radiation configuration is None at line {}".format(
+                        line_num
+                    )
+                )
+                return
+
+            # Validate configuration structure
+            if not isinstance(self.solar_radiation, dict):
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Solar radiation configuration is not a dictionary at line {}".format(
+                        line_num
+                    )
                 )
                 return
 
             # Get light level sensor data
+            sensor_id = self.solar_radiation.get("sensor")
+            if not sensor_id:
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Solar radiation sensor ID is missing at line {}".format(
+                        line_num
+                    )
+                )
+                return
+
             light_state = self._get_safe_state(
-                self.solar_radiation.get("sensor"),
+                sensor_id,
                 attribute="state",
                 log_name="Light level sensor"
             )
             if light_state is None or not isinstance(light_state, str):
                 return
 
-            light_level = float(light_state)
+            # Convert and validate light level
+            try:
+                light_level = float(light_state)
+            except (ValueError, TypeError) as e:
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Failed to convert light level '{}' to float at line {}: {}".format(
+                        light_state, line_num, e
+                    )
+                )
+                return
+
             threshold = self.solar_radiation.get("threshold")
             elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
+
+            # Validate threshold values
+            if threshold is None:
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Solar radiation threshold is None at line {}".format(
+                        line_num
+                    )
+                )
+                return
+
+            try:
+                threshold = float(threshold)
+            except (ValueError, TypeError) as e:
+                line_num = traceback.extract_stack()[-1].lineno
+                self.log(
+                    "ERROR: Failed to convert threshold '{}' to float at line {}: {}".format(
+                        self.solar_radiation.get("threshold"), line_num, e
+                    )
+                )
+                return
 
             # Morning to Day transition
             if (self.current_state == "morning" and is_rising and
                     current_elevation > elevation_threshold and light_level > threshold):
 
                 self.log(
-                    "Transitioning morning -> day (light_level {} > threshold {}, elevation {} > {})".format(
+                    "Transitioning morning -> day (light_level {:.2f} > threshold {}, elevation {:.2f} > {})".format(
                         light_level, threshold, current_elevation, elevation_threshold
                     )
                 )
@@ -636,19 +726,18 @@ class AutomaticLights(hass.Hass):
             elif self.current_state == "day" and not is_rising:
                 if light_level < threshold:
                     self.log(
-                        "Transitioning day -> evening (light_level {} < threshold {})".format(
+                        "Transitioning day -> evening (light_level {:.2f} < threshold {})".format(
                             light_level, threshold
                         )
                     )
                     self.start_evening(None)
                 elif current_elevation < elevation_threshold:
                     self.log(
-                        "Transitioning day -> evening (elevation {} < {})".format(
+                        "Transitioning day -> evening (elevation {:.2f} < {})".format(
                             current_elevation, elevation_threshold
                         )
                     )
                     self.start_evening(None)
-
 
         except Exception as e:
             line_num = traceback.extract_stack()[-1].lineno
@@ -662,9 +751,15 @@ class AutomaticLights(hass.Hass):
         """
         Process state transitions when solar radiation monitoring is disabled.
 
+        This method handles state transitions based on solar elevation and rising
+        status only, providing a simpler but effective lighting control mechanism.
+
         Args:
             current_elevation: Current solar elevation in degrees
             is_rising: Whether the sun is currently rising
+
+        Raises:
+            ValueError: If elevation data is invalid
         """
         try:
             elevation_threshold = DEFAULT_ELEVATION_THRESHOLD
@@ -674,7 +769,7 @@ class AutomaticLights(hass.Hass):
                     current_elevation > elevation_threshold):
 
                 self.log(
-                    "Transitioning morning -> day (elevation {} > {}, rising)".format(
+                    "Transitioning morning -> day (elevation {:.2f} > {}, rising)".format(
                         current_elevation, elevation_threshold
                     )
                 )
@@ -685,12 +780,11 @@ class AutomaticLights(hass.Hass):
                   current_elevation < elevation_threshold):
 
                 self.log(
-                    "Transitioning day -> evening (not rising, elevation {} < {})".format(
+                    "Transitioning day -> evening (not rising, elevation {:.2f} < {})".format(
                         current_elevation, elevation_threshold
                     )
                 )
                 self.start_evening(None)
-
 
         except Exception as e:
             line_num = traceback.extract_stack()[-1].lineno
@@ -702,19 +796,24 @@ class AutomaticLights(hass.Hass):
 
     def calculate_state(self) -> str:
         """
-        Calculate the initial time-based state on startup.
+        Calculate the initial state based on time, sun position, and solar radiation.
 
         This method determines the initial lighting state based on current time
-        relative to sunrise, sunset, and configured start times. It is only
-        called during initialization to set the starting state. All subsequent
-        state transitions are handled by sensor-based logic in sun_pos().
+        relative to sunrise, sunset, and configured start times, enhanced with
+        sun position and solar radiation data for more accurate state detection.
+        It is only called during initialization to set the starting state.
 
         State Calculation Logic:
         1. Night: Before sunrise and before morning start time
         2. Morning: After morning start but before sunrise
-        3. Day: After sunrise but before sunset
-        4. Evening: After sunset but before night start time
+        3. Day: After sunrise but before sunset (with solar radiation validation)
+        4. Evening: After sunset but before night start time (with solar radiation validation)
         5. Night: After night start time
+
+        Solar Radiation Enhancement:
+        - If solar radiation monitoring is enabled, validates day/evening states
+        - Uses light level and elevation thresholds to confirm environmental conditions
+        - Falls back to time-based logic if sensors are unavailable
 
         Returns:
             str: Initial state ('night', 'morning', 'day', or 'evening')
@@ -724,7 +823,7 @@ class AutomaticLights(hass.Hass):
         """
         try:
             self.log(
-                "Calculating initial state based on current time..."
+                "Calculating initial state based on time, sun position, and solar radiation..."
             )
 
             now = self.time()
@@ -752,7 +851,24 @@ class AutomaticLights(hass.Hass):
                 )
                 night_start = self.parse_time(DEFAULT_NIGHT_START)  # Default fallback
 
-            # Determine state based on time relationships
+            # Get current sensor data for enhanced state calculation
+            sensor_data = self._get_sensor_data()
+            current_elevation = None
+            is_rising = None
+
+            if sensor_data is not None:
+                current_elevation, is_rising = sensor_data
+                self.log(
+                    "Sensor data available: elevation={}, rising={}".format(
+                        current_elevation, is_rising
+                    )
+                )
+            else:
+                self.log(
+                    "Sensor data unavailable, using time-based state calculation only"
+                )
+
+            # Determine initial state based on time relationships
             if now <= sunrise and now <= morning_start:
                 initial_state = "night"
             elif now > morning_start and now < sunrise:
@@ -767,9 +883,20 @@ class AutomaticLights(hass.Hass):
                 # Fallback - should never reach here
                 initial_state = "night"
 
+            # Enhance state calculation with solar radiation data if available
+            if sensor_data is not None and self.solar_radiation and current_elevation is not None and is_rising is not None:
+                initial_state = self._enhance_state_with_solar_radiation(
+                    initial_state, current_elevation, is_rising
+                )
+            elif sensor_data is not None and current_elevation is not None and is_rising is not None:
+                initial_state = self._enhance_state_with_elevation_only(
+                    initial_state, current_elevation, is_rising
+                )
+
             self.log(
-                "Initial state: {} (now={}, sunrise={}, sunset={}, morning={}, night={})".format(
-                    initial_state, now, sunrise, sunset, morning_start, night_start
+                "Initial state: {} (now={}, sunrise={}, sunset={}, morning={}, night={}, elevation={}, rising={})".format(
+                    initial_state, now, sunrise, sunset, morning_start, night_start,
+                    current_elevation, is_rising
                 )
             )
 
@@ -783,6 +910,143 @@ class AutomaticLights(hass.Hass):
                 )
             )
             return "night"  # Safe fallback
+
+    def _enhance_state_with_solar_radiation(self, initial_state: str, current_elevation: float, is_rising: bool) -> str:
+        """
+        Enhance state calculation with solar radiation data.
+
+        This method validates and potentially adjusts the initial state based on
+        solar radiation sensor data and elevation thresholds.
+
+        Args:
+            initial_state: The time-based initial state
+            current_elevation: Current solar elevation in degrees
+            is_rising: Whether the sun is currently rising
+
+        Returns:
+            str: Enhanced state that considers environmental conditions
+        """
+        try:
+            # Validate solar radiation configuration is available
+            if not self.solar_radiation:
+                self.log(
+                    "Solar radiation configuration is None, keeping initial state: {}".format(
+                        initial_state
+                    )
+                )
+                return initial_state
+
+            # Get light level sensor data
+            light_state = self._get_safe_state(
+                self.solar_radiation.get("sensor"),
+                attribute="state",
+                log_name="Light level sensor"
+            )
+            if light_state is None or not isinstance(light_state, str):
+                self.log(
+                    "Light level sensor unavailable, keeping initial state: {}".format(
+                        initial_state
+                    )
+                )
+                return initial_state
+
+            light_level = float(light_state)
+            threshold = self.solar_radiation.get("threshold")
+            elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
+
+            self.log(
+                "Enhancing state with solar radiation: initial={}, light={}, threshold={}, elevation={}, threshold={}, rising={}".format(
+                    initial_state, light_level, threshold, current_elevation, elevation_threshold, is_rising
+                )
+            )
+
+            # Adjust state based on environmental conditions
+            if initial_state == "day":
+                # If it's supposed to be day but light level is low, check if it should be evening
+                if light_level < threshold or (not is_rising and current_elevation < elevation_threshold):
+                    self.log(
+                        "Adjusting day -> evening: light_level {} < threshold {} OR (not rising AND elevation {} < {})".format(
+                            light_level, threshold, current_elevation, elevation_threshold
+                        )
+                    )
+                    return "evening"
+
+            elif initial_state == "evening":
+                # If it's supposed to be evening but light level is high, check if it should still be day
+                if light_level > threshold and is_rising and current_elevation > elevation_threshold:
+                    self.log(
+                        "Adjusting evening -> day: light_level {} > threshold {} AND rising AND elevation {} > {}".format(
+                            light_level, threshold, current_elevation, elevation_threshold
+                        )
+                    )
+                    return "day"
+
+            return initial_state
+
+        except Exception as e:
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to enhance state with solar radiation at line {}: {}".format(
+                    line_num, e
+                )
+            )
+            return initial_state
+
+    def _enhance_state_with_elevation_only(self, initial_state: str, current_elevation: float, is_rising: bool) -> str:
+        """
+        Enhance state calculation with elevation data only.
+
+        This method validates and potentially adjusts the initial state based on
+        solar elevation and rising status when solar radiation monitoring is disabled.
+
+        Args:
+            initial_state: The time-based initial state
+            current_elevation: Current solar elevation in degrees
+            is_rising: Whether the sun is currently rising
+
+        Returns:
+            str: Enhanced state that considers elevation conditions
+        """
+        try:
+            elevation_threshold = DEFAULT_ELEVATION_THRESHOLD
+
+            self.log(
+                "Enhancing state with elevation only: initial={}, elevation={}, threshold={}, rising={}".format(
+                    initial_state, current_elevation, elevation_threshold, is_rising
+                )
+            )
+
+            # Adjust state based on elevation conditions
+            if initial_state == "day":
+                # If it's supposed to be day but elevation is low and sun is not rising, check if it should be evening
+                if not is_rising and current_elevation < elevation_threshold:
+                    self.log(
+                        "Adjusting day -> evening: not rising AND elevation {} < {}".format(
+                            current_elevation, elevation_threshold
+                        )
+                    )
+                    return "evening"
+
+            elif initial_state == "evening":
+                # If it's supposed to be evening but elevation is high and sun is rising, check if it should still be day
+                if is_rising and current_elevation > elevation_threshold:
+                    self.log(
+                        "Adjusting evening -> day: rising AND elevation {} > {}".format(
+                            current_elevation, elevation_threshold
+                        )
+                    )
+                    return "day"
+
+            return initial_state
+
+        except Exception as e:
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to enhance state with elevation only at line {}: {}".format(
+                    line_num, e
+                )
+            )
+            return initial_state
 
     def start_morning(self, _kwargs: Optional[Dict[str, Any]]) -> None:
         """
@@ -1232,6 +1496,9 @@ class AutomaticLights(hass.Hass):
             scene_name: Name of the scene to activate
             validation_func: Optional function that returns True to skip activation
             skip_message: Message to log if validation fails and scene is skipped
+
+        Raises:
+            ValueError: If scene activation fails
         """
         try:
             # Always update the current state first, regardless of validation
@@ -1278,4 +1545,5 @@ class AutomaticLights(hass.Hass):
                     scene_name, line_num, e
                 )
             )
+            raise ValueError(f"Scene activation failed for '{scene_name}'") from e
 
