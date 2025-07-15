@@ -19,8 +19,8 @@ import appdaemon.plugins.hass.hassapi as hass
 # Constants
 DEFAULT_ELEVATION_THRESHOLD = 3.0
 CACHE_EXPIRY_HOURS = 6
-MAX_RETRIES = 2
-RETRY_DELAY = 0.5
+MAX_RETRIES = 1  # Reduced from 2 to 1 for faster failure handling
+RETRY_DELAY = 0.1  # Reduced from 0.5 to 0.1 for faster retries
 DEFAULT_MORNING_START = "05:30"
 DEFAULT_NIGHT_START = "23:30"
 RANDOM_DELAY_SECONDS = 600
@@ -61,6 +61,17 @@ class AutomaticLights(hass.Hass):
         threshold (float): Light level threshold for transitions
         elevation_threshold (float, optional): Solar elevation threshold (default: 3)
     """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Debouncing for state changes to prevent excessive processing
+        self.last_state_change_time = 0
+        self.state_change_debounce_seconds = 5  # Minimum 5 seconds between state changes
+
+        # Sensor data caching
+        self.sensor_cache = {}
+        self.sensor_cache_time = {}
+        self.sensor_cache_duration = 30  # Cache sensor data for 30 seconds
 
     def initialize(self) -> None:
         """
@@ -343,11 +354,6 @@ class AutomaticLights(hass.Hass):
             this method will activate the 'morning' scene configuration.
         """
         try:
-            self.log(
-                "Manual scene activation event received: event_name={}".format(
-                    event_name
-                )
-            )
 
             # Extract scene name from service data
             service_data = data.get("service_data", {})
@@ -521,11 +527,11 @@ class AutomaticLights(hass.Hass):
             kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log(
-                "Sun position change detected: entity={}, attribute={}, old={}, new={}".format(
-                    entity, attribute, old, new
-                )
-            )
+            # Debounce rapid state changes
+            current_time = time.time()
+            if current_time - self.last_state_change_time < self.state_change_debounce_seconds:
+                return
+            self.last_state_change_time = current_time
 
             # Get current sensor values
             sensor_data = self._get_sensor_data()
@@ -570,12 +576,6 @@ class AutomaticLights(hass.Hass):
             current_elevation = float(elevation_state)
             is_rising = rising_state is True
 
-            self.log(
-                "Sensor data: elevation={}, rising={}, state={}".format(
-                    current_elevation, is_rising, self.current_state
-                )
-            )
-
             return current_elevation, is_rising
 
         except (ValueError, TypeError) as e:
@@ -616,12 +616,6 @@ class AutomaticLights(hass.Hass):
             threshold = self.solar_radiation.get("threshold")
             elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
 
-            self.log(
-                "Solar radiation: light={}, threshold={}, elevation_threshold={}".format(
-                    light_level, threshold, elevation_threshold
-                )
-            )
-
             # Morning to Day transition
             if (self.current_state == "morning" and is_rising and
                     current_elevation > elevation_threshold and light_level > threshold):
@@ -649,12 +643,7 @@ class AutomaticLights(hass.Hass):
                         )
                     )
                     self.start_evening(None)
-                else:
-                    self.log(
-                        "Day -> evening transition skipped: light_level {} >= threshold {}, elevation {} >= {}".format(
-                            light_level, threshold, current_elevation, elevation_threshold
-                        )
-                    )
+
 
         except Exception as e:
             line_num = traceback.extract_stack()[-1].lineno
@@ -696,12 +685,7 @@ class AutomaticLights(hass.Hass):
                     )
                 )
                 self.start_evening(None)
-            else:
-                self.log(
-                    "Day -> evening transition skipped: elevation {} >= {} or sun is rising".format(
-                        current_elevation, elevation_threshold
-                    )
-                )
+
 
         except Exception as e:
             line_num = traceback.extract_stack()[-1].lineno
@@ -807,9 +791,6 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log(
-                "Morning scene activation requested"
-            )
 
             def should_skip() -> bool:
                 """Check if morning scene should be skipped."""
@@ -854,9 +835,6 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log(
-                "Day scene activation requested"
-            )
             self._start_scene("day")
 
         except Exception as e:
@@ -878,9 +856,6 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log(
-                "Evening scene activation requested"
-            )
 
             def should_skip() -> bool:
                 """Check if evening scene should be skipped."""
@@ -914,9 +889,6 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log(
-                "Night scene activation requested"
-            )
             self._start_scene("night")
 
         except Exception as e:
@@ -1015,27 +987,13 @@ class AutomaticLights(hass.Hass):
         """
         try:
             if not self.groups or not self.groups_cache_time:
-                self.log(
-                    "Group cache is empty or missing timestamp, refreshing..."
-                )
                 self.get_groups()
             else:
                 # Calculate cache age using datetime objects
                 now = datetime.now()
                 cache_age = (now - self.groups_cache_time).total_seconds()
                 if cache_age > CACHE_EXPIRY_HOURS * 3600:  # Convert hours to seconds
-                    self.log(
-                        "Group cache expired (age: {:.1f} hours), refreshing...".format(
-                            cache_age / 3600
-                        )
-                    )
                     self.get_groups()
-                else:
-                    self.log(
-                        "Group cache is fresh (age: {:.1f} hours)".format(
-                            cache_age / 3600
-                        )
-                    )
 
         except Exception as e:
             line_num = traceback.extract_stack()[-1].lineno
@@ -1081,31 +1039,42 @@ class AutomaticLights(hass.Hass):
                         )
                         continue
 
-                    # Control each entity in the group
-                    for entity in entities:
-                        try:
-                            entity_count += 1
+                    # Control entities in batch for efficiency
+                    entity_count += len(entities)
 
-                            if run_now:
+                    if run_now:
+                        # Immediate execution - control all entities in the group
+                        for entity in entities:
+                            try:
                                 self._turn_onoff({"entity": entity, "state": group_state})
-                            else:
+                                success_count += 1
+                            except Exception as e:
+                                line_num = traceback.extract_stack()[-1].lineno
+                                self.log(
+                                    "ERROR: Failed to control entity '{}' at line {}: {}".format(
+                                        entity, line_num, e
+                                    )
+                                )
+                    else:
+                        # Delayed execution - schedule all entities with staggered timing
+                        for i, entity in enumerate(entities):
+                            try:
+                                # Stagger delays to prevent overwhelming the system
+                                delay = (i * 0.1) % (RANDOM_DELAY_SECONDS / 10)  # Spread over 10% of max delay
                                 self.run_in(
                                     self._turn_onoff,
-                                    0,
-                                    random_start=0,
-                                    random_end=RANDOM_DELAY_SECONDS,
+                                    delay,
                                     entity=entity,
                                     state=group_state
                                 )
-                            success_count += 1
-
-                        except Exception as e:
-                            line_num = traceback.extract_stack()[-1].lineno
-                            self.log(
-                                "ERROR: Failed to control entity '{}' at line {}: {}".format(
-                                    entity, line_num, e
+                                success_count += 1
+                            except Exception as e:
+                                line_num = traceback.extract_stack()[-1].lineno
+                                self.log(
+                                    "ERROR: Failed to schedule entity '{}' at line {}: {}".format(
+                                        entity, line_num, e
+                                    )
                                 )
-                            )
 
                 except Exception as e:
                     line_num = traceback.extract_stack()[-1].lineno
@@ -1198,6 +1167,7 @@ class AutomaticLights(hass.Hass):
 
         This method provides a safe wrapper around Home Assistant's get_state
         method, handling unavailable entities and network errors gracefully.
+        Includes caching to reduce API calls for frequently accessed entities.
 
         Args:
             entity: Entity ID to query
@@ -1208,6 +1178,16 @@ class AutomaticLights(hass.Hass):
             State value as string or dictionary, or None if entity is unavailable or error occurs
         """
         try:
+            # Check cache first
+            cache_key = f"{entity}:{attribute or 'state'}"
+            current_time = time.time()
+
+            if cache_key in self.sensor_cache:
+                cache_age = current_time - self.sensor_cache_time.get(cache_key, 0)
+                if cache_age < self.sensor_cache_duration:
+                    return self.sensor_cache[cache_key]
+
+            # Get fresh state from Home Assistant
             state = self.get_state(entity, attribute=attribute)
 
             if state is None or state == "unavailable":
@@ -1218,6 +1198,10 @@ class AutomaticLights(hass.Hass):
                     )
                 )
                 return None
+
+            # Cache the result
+            self.sensor_cache[cache_key] = state
+            self.sensor_cache_time[cache_key] = current_time
 
             return state
 
@@ -1248,11 +1232,6 @@ class AutomaticLights(hass.Hass):
             # Always update the current state first, regardless of validation
             self.current_state = scene_name
             self.set_state(TIME_STATE_ENTITY, state=scene_name)
-            self.log(
-                "State updated: current_state={}".format(
-                    scene_name
-                )
-            )
 
             # Run validation if provided
             if validation_func is not None:
