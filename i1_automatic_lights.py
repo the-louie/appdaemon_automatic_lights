@@ -64,14 +64,14 @@ class AutomaticLights(hass.Hass):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Debouncing for state changes to prevent excessive processing
+                # Debouncing for state changes to prevent excessive processing
         self.last_state_change_time = 0
-        self.state_change_debounce_seconds = 5  # Minimum 5 seconds between state changes
+        self.state_change_debounce_seconds = 60  # Minimum 60 seconds between state changes
 
         # Sensor data caching
         self.sensor_cache = {}
         self.sensor_cache_time = {}
-        self.sensor_cache_duration = 30  # Cache sensor data for 30 seconds
+        self.sensor_cache_duration = 60  # Cache sensor data for 60 seconds
 
     def initialize(self) -> None:
         """
@@ -354,6 +354,11 @@ class AutomaticLights(hass.Hass):
             this method will activate the 'morning' scene configuration.
         """
         try:
+            self.log(
+                "Manual scene activation event received: event_name={}".format(
+                    event_name
+                )
+            )
 
             # Extract scene name from service data
             service_data = data.get("service_data", {})
