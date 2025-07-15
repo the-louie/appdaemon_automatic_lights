@@ -96,11 +96,12 @@ class AutomaticLights(hass.Hass):
         # Set up scheduled events
         self._setup_scheduled_events()
 
-        self.log("AutomaticLights initialized: morning={}, night={}, solar_radiation={}, scenes={}".format(
-            self.morning_start, self.night_start,
-            "enabled" if self.solar_radiation else "disabled",
-            len(self.scenes)
-        ))
+        solar_status = "enabled" if self.solar_radiation else "disabled"
+        self.log(
+            "AutomaticLights initialized: morning={}, night={}, solar_radiation={}, scenes={}".format(
+                self.morning_start, self.night_start, solar_status, len(self.scenes)
+            )
+        )
 
     def _initialize_time_config(self) -> None:
         """
@@ -114,25 +115,38 @@ class AutomaticLights(hass.Hass):
             self.night_start = str(self.args.get("night_start", DEFAULT_NIGHT_START))
 
             if not self.morning_start or self.morning_start == "None":
-                self.log("ERROR: morning_start is required, format: HH:MM - using default {}".format(DEFAULT_MORNING_START))
+                self.log(
+                    "ERROR: morning_start is required, format: HH:MM - using default {}".format(
+                        DEFAULT_MORNING_START
+                    )
+                )
                 self.morning_start = DEFAULT_MORNING_START
 
             if not self.night_start or self.night_start == "None":
-                self.log("ERROR: night_start is required, format: HH:MM - using default {}".format(DEFAULT_NIGHT_START))
+                self.log(
+                    "ERROR: night_start is required, format: HH:MM - using default {}".format(
+                        DEFAULT_NIGHT_START
+                    )
+                )
                 self.night_start = DEFAULT_NIGHT_START
 
             # Validate time format by attempting to parse
             self.parse_time(self.morning_start)
             self.parse_time(self.night_start)
 
-            self.log("Time configuration validated: morning_start={}, night_start={}".format(
-                self.morning_start, self.night_start
-            ))
+            self.log(
+                "Time configuration validated: morning_start={}, night_start={}".format(
+                    self.morning_start, self.night_start
+                )
+            )
 
         except Exception as e:
-            self.log("ERROR: Failed to initialize time configuration at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to initialize time configuration at line {}: {}".format(
+                    line_num, e
+                )
+            )
             raise ValueError("Invalid time configuration") from e
 
     def _initialize_solar_radiation_config(self) -> None:
@@ -155,8 +169,9 @@ class AutomaticLights(hass.Hass):
                 self.solar_radiation = None
                 return
 
-            if "sensor" not in self.solar_radiation or "threshold" not in self.solar_radiation:
-                self.log("ERROR: solar_radiation must contain 'sensor' and 'threshold' keys - disabling solar radiation monitoring")
+            required_keys = ["sensor", "threshold"]
+            if not all(key in self.solar_radiation for key in required_keys):
+                self.log("ERROR: solar_radiation must contain 'sensor' and 'threshold' keys - disabling monitoring")
                 self.solar_radiation = None
                 return
 
@@ -170,20 +185,27 @@ class AutomaticLights(hass.Hass):
             try:
                 float(threshold)
             except (ValueError, TypeError):
-                self.log("ERROR: solar_radiation threshold must be a numeric value - disabling solar radiation monitoring")
+                self.log("ERROR: solar_radiation threshold must be a numeric value - disabling monitoring")
                 self.solar_radiation = None
                 return
 
-            self.log("Solar radiation monitoring enabled: sensor={}, threshold={}, elevation_threshold={}".format(
-                self.solar_radiation.get("sensor"),
-                self.solar_radiation.get("threshold"),
-                self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
-            ))
+            sensor_id = self.solar_radiation.get("sensor")
+            threshold_val = self.solar_radiation.get("threshold")
+            elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
+
+            self.log(
+                "Solar radiation monitoring enabled: sensor={}, threshold={}, elevation_threshold={}".format(
+                    sensor_id, threshold_val, elevation_threshold
+                )
+            )
 
         except Exception as e:
-            self.log("ERROR: Failed to initialize solar radiation configuration at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to initialize solar radiation configuration at line {}: {}".format(
+                    line_num, e
+                )
+            )
             self.solar_radiation = None
 
     def _initialize_state_and_cache(self) -> None:
@@ -206,21 +228,34 @@ class AutomaticLights(hass.Hass):
             # Get Scenes
             self.scenes = self.args.get("scenes", {})
 
-            self.log("State and cache initialized: current_state={}, groups={}, scenes={}".format(
-                self.current_state, len(self.groups), len(self.scenes)
-            ))
+            self.log(
+                "State and cache initialized: current_state={}, groups={}, scenes={}".format(
+                    self.current_state, len(self.groups), len(self.scenes)
+                )
+            )
 
             # Activate the scene for the calculated initial state
             if self.current_state in self.scenes:
-                self.log("Activating initial scene for calculated state: {}".format(self.current_state))
+                self.log(
+                    "Activating initial scene for calculated state: {}".format(
+                        self.current_state
+                    )
+                )
                 self.activate_scene(self.current_state, run_now=True)
             else:
-                self.log("WARNING: No scene configuration found for initial state: {}".format(self.current_state))
+                self.log(
+                    "WARNING: No scene configuration found for initial state: {}".format(
+                        self.current_state
+                    )
+                )
 
         except Exception as e:
-            self.log("ERROR: Failed to initialize state and cache at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to initialize state and cache at line {}: {}".format(
+                    line_num, e
+                )
+            )
             raise
 
     def _register_event_listeners(self) -> None:
@@ -234,16 +269,25 @@ class AutomaticLights(hass.Hass):
         try:
             # Sun position events
             self.listen_state(self.sun_pos, SUN_ELEVATION_SENSOR)
-            self.log("Registered listener for sun position changes: {}".format(SUN_ELEVATION_SENSOR))
+            self.log(
+                "Registered listener for sun position changes: {}".format(
+                    SUN_ELEVATION_SENSOR
+                )
+            )
 
             # Manual scene events
             self.listen_event(self.manual_scene, event='call_service', domain='scene')
-            self.log("Registered listener for manual scene activation")
+            self.log(
+                "Registered listener for manual scene activation"
+            )
 
         except Exception as e:
-            self.log("ERROR: Failed to register event listeners at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to register event listeners at line {}: {}".format(
+                    line_num, e
+                )
+            )
             raise
 
     def _setup_scheduled_events(self) -> None:
@@ -255,20 +299,30 @@ class AutomaticLights(hass.Hass):
         """
         try:
             # Time based events with randomized delays
-            self.run_daily(self.start_morning, self.morning_start,
-                          random_start=MORNING_RANDOM_START, random_end=MORNING_RANDOM_END)
-            self.run_daily(self.start_night, self.night_start,
-                          random_start=NIGHT_RANDOM_START, random_end=NIGHT_RANDOM_END)
+            self.run_daily(
+                self.start_morning, self.morning_start,
+                random_start=MORNING_RANDOM_START, random_end=MORNING_RANDOM_END
+            )
+            self.run_daily(
+                self.start_night, self.night_start,
+                random_start=NIGHT_RANDOM_START, random_end=NIGHT_RANDOM_END
+            )
 
-            self.log("Scheduled events: morning={}, night={}, sunrise={}, sunset={}, state={}".format(
-                self.morning_start, self.night_start,
-                self.sunrise().time(), self.sunset().time(), self.current_state
-            ))
+            sunrise_time = self.sunrise().time()
+            sunset_time = self.sunset().time()
+            self.log(
+                "Scheduled events: morning={}, night={}, sunrise={}, sunset={}, state={}".format(
+                    self.morning_start, self.night_start, sunrise_time, sunset_time, self.current_state
+                )
+            )
 
         except Exception as e:
-            self.log("ERROR: Failed to setup scheduled events at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to setup scheduled events at line {}: {}".format(
+                    line_num, e
+                )
+            )
             raise
 
     def manual_scene(self, event_name: str, data: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
@@ -289,14 +343,20 @@ class AutomaticLights(hass.Hass):
             this method will activate the 'morning' scene configuration.
         """
         try:
-            self.log("Manual scene activation event received: event_name={}".format(event_name))
+            self.log(
+                "Manual scene activation event received: event_name={}".format(
+                    event_name
+                )
+            )
 
             # Extract scene name from service data
             service_data = data.get("service_data", {})
             scene_entity = service_data.get("entity_id")
 
             if scene_entity is None:
-                self.log("ERROR: No entity_id found in manual scene event data")
+                self.log(
+                    "ERROR: No entity_id found in manual scene event data"
+                )
                 return
 
             # Handle both single entity and list of entities
@@ -310,35 +370,56 @@ class AutomaticLights(hass.Hass):
                 try:
                     # Remove 'scene.' prefix to get scene name
                     if not scene_entity.startswith(SCENE_PREFIX):
-                        self.log("WARNING: Invalid scene entity_id format: {}".format(scene_entity))
+                        self.log(
+                            "WARNING: Invalid scene entity_id format: {}".format(
+                                scene_entity
+                            )
+                        )
                         continue
 
                     scene_name = scene_entity.replace(SCENE_PREFIX, "")
 
                     if not scene_name:
-                        self.log("ERROR: Invalid scene entity_id: {}".format(scene_entity))
+                        self.log(
+                            "ERROR: Invalid scene entity_id: {}".format(
+                                scene_entity
+                            )
+                        )
                         continue
 
                     # Validate scene exists in configuration
                     if scene_name not in self.scenes:
-                        self.log("ERROR: Scene '{}' not found in configuration. Available: {}".format(
-                            scene_name, list(self.scenes.keys())
-                        ))
+                        available_scenes = list(self.scenes.keys())
+                        self.log(
+                            "ERROR: Scene '{}' not found in configuration. Available scenes: {}".format(
+                                scene_name, available_scenes
+                            )
+                        )
                         continue
 
-                    self.log("Activating manual scene: {} (from entity: {})".format(scene_name, scene_entity))
+                    self.log(
+                        "Activating manual scene: {} (from entity: {})".format(
+                            scene_name, scene_entity
+                        )
+                    )
                     self.activate_scene(scene_name, run_now=True)
 
                 except Exception as e:
-                    self.log("ERROR: Failed to process scene entity '{}' at line {}: {}".format(
-                        scene_entity, traceback.extract_stack()[-1].lineno, e
-                    ))
+                    line_num = traceback.extract_stack()[-1].lineno
+                    self.log(
+                        "ERROR: Failed to process scene entity '{}' at line {}: {}".format(
+                            scene_entity, line_num, e
+                        )
+                    )
                     continue
 
         except Exception as e:
-            self.log("ERROR: Failed to handle manual scene event at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to handle manual scene event at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def get_groups(self) -> None:
         """
@@ -356,12 +437,16 @@ class AutomaticLights(hass.Hass):
             self.groups_cache_time: datetime - Timestamp of last cache update
         """
         try:
-            self.log("Retrieving and caching Home Assistant groups...")
+            self.log(
+                "Retrieving and caching Home Assistant groups..."
+            )
 
             # Get all groups from Home Assistant
             state_groups = self._get_safe_state("group", log_name="Groups")
             if state_groups is None or not isinstance(state_groups, dict):
-                self.log("ERROR: Failed to retrieve groups from Home Assistant or invalid format")
+                self.log(
+                    "ERROR: Failed to retrieve groups from Home Assistant or invalid format"
+                )
                 return
 
             # Process and cache group data
@@ -375,7 +460,11 @@ class AutomaticLights(hass.Hass):
                     entities = group_data.get("attributes", {}).get("entity_id", [])
 
                     if not isinstance(entities, list):
-                        self.log("WARNING: Invalid entity list for group {}: {}".format(group_id, entities))
+                        self.log(
+                            "WARNING: Invalid entity list for group {}: {}".format(
+                                group_id, entities
+                            )
+                        )
                         continue
 
                     self.groups[group_id] = entities
@@ -383,20 +472,30 @@ class AutomaticLights(hass.Hass):
                     entity_count += len(entities)
 
                 except Exception as e:
-                    self.log("ERROR: Failed to process group {} at line {}: {}".format(
-                        group_id, traceback.extract_stack()[-1].lineno, e
-                    ))
+                    line_num = traceback.extract_stack()[-1].lineno
+                    self.log(
+                        "ERROR: Failed to process group {} at line {}: {}".format(
+                            group_id, line_num, e
+                        )
+                    )
                     continue
 
             # Update cache timestamp
             self.groups_cache_time = datetime.now()
 
-            self.log("Group cache updated: {} groups, {} total entities".format(group_count, entity_count))
+            self.log(
+                "Group cache updated: {} groups, {} total entities".format(
+                    group_count, entity_count
+                )
+            )
 
         except Exception as e:
-            self.log("ERROR: Failed to get groups at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to get groups at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def sun_pos(self, entity: str, attribute: str, old: str, new: str, kwargs: Dict[str, Any]) -> None:
         """
@@ -422,9 +521,11 @@ class AutomaticLights(hass.Hass):
             kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log("Sun position change detected: entity={}, attribute={}, old={}, new={}".format(
-                entity, attribute, old, new
-            ))
+            self.log(
+                "Sun position change detected: entity={}, attribute={}, old={}, new={}".format(
+                    entity, attribute, old, new
+                )
+            )
 
             # Get current sensor values
             sensor_data = self._get_sensor_data()
@@ -440,9 +541,12 @@ class AutomaticLights(hass.Hass):
                 self._process_elevation_only_transitions(current_elevation, is_rising)
 
         except Exception as e:
-            self.log("ERROR: Failed to process sun position change at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to process sun position change at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def _get_sensor_data(self) -> Optional[tuple[float, bool]]:
         """
@@ -466,16 +570,21 @@ class AutomaticLights(hass.Hass):
             current_elevation = float(elevation_state)
             is_rising = rising_state is True
 
-            self.log("Sensor data: elevation={}, rising={}, state={}".format(
-                current_elevation, is_rising, self.current_state
-            ))
+            self.log(
+                "Sensor data: elevation={}, rising={}, state={}".format(
+                    current_elevation, is_rising, self.current_state
+                )
+            )
 
             return current_elevation, is_rising
 
         except (ValueError, TypeError) as e:
-            self.log("ERROR: Failed to convert sensor values to float at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to convert sensor values to float at line {}: {}".format(
+                    line_num, e
+                )
+            )
             return None
 
     def _process_solar_radiation_transitions(self, current_elevation: float, is_rising: bool) -> None:
@@ -489,7 +598,9 @@ class AutomaticLights(hass.Hass):
         try:
             # Validate solar radiation configuration is available
             if not self.solar_radiation:
-                self.log("ERROR: Solar radiation configuration is None")
+                self.log(
+                    "ERROR: Solar radiation configuration is None"
+                )
                 return
 
             # Get light level sensor data
@@ -505,42 +616,53 @@ class AutomaticLights(hass.Hass):
             threshold = self.solar_radiation.get("threshold")
             elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
 
-            self.log("Solar radiation: light={}, threshold={}, elevation_threshold={}".format(
-                light_level, threshold, elevation_threshold
-            ))
+            self.log(
+                "Solar radiation: light={}, threshold={}, elevation_threshold={}".format(
+                    light_level, threshold, elevation_threshold
+                )
+            )
 
             # Morning to Day transition
-            if (self.current_state == "morning" and
-                is_rising and
-                current_elevation > elevation_threshold and
-                light_level > threshold):
+            if (self.current_state == "morning" and is_rising and
+                    current_elevation > elevation_threshold and light_level > threshold):
 
-                self.log("Transitioning morning -> day (light_level {} > threshold {}, elevation {} > {})".format(
-                    light_level, threshold, current_elevation, elevation_threshold
-                ))
+                self.log(
+                    "Transitioning morning -> day (light_level {} > threshold {}, elevation {} > {})".format(
+                        light_level, threshold, current_elevation, elevation_threshold
+                    )
+                )
                 self.start_day(None)
 
             # Day to Evening transition
             elif self.current_state == "day" and not is_rising:
                 if light_level < threshold:
-                    self.log("Transitioning day -> evening (light_level {} < threshold {})".format(
-                        light_level, threshold
-                    ))
+                    self.log(
+                        "Transitioning day -> evening (light_level {} < threshold {})".format(
+                            light_level, threshold
+                        )
+                    )
                     self.start_evening(None)
                 elif current_elevation < elevation_threshold:
-                    self.log("Transitioning day -> evening (elevation {} < {})".format(
-                        current_elevation, elevation_threshold
-                    ))
+                    self.log(
+                        "Transitioning day -> evening (elevation {} < {})".format(
+                            current_elevation, elevation_threshold
+                        )
+                    )
                     self.start_evening(None)
                 else:
-                    self.log("Day -> evening transition skipped: light_level {} >= threshold {}, elevation {} >= {}".format(
-                        light_level, threshold, current_elevation, elevation_threshold
-                    ))
+                    self.log(
+                        "Day -> evening transition skipped: light_level {} >= threshold {}, elevation {} >= {}".format(
+                            light_level, threshold, current_elevation, elevation_threshold
+                        )
+                    )
 
         except Exception as e:
-            self.log("ERROR: Failed to process solar radiation transitions at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to process solar radiation transitions at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def _process_elevation_only_transitions(self, current_elevation: float, is_rising: bool) -> None:
         """
@@ -554,33 +676,40 @@ class AutomaticLights(hass.Hass):
             elevation_threshold = DEFAULT_ELEVATION_THRESHOLD
 
             # Morning to Day transition
-            if (self.current_state == "morning" and
-                is_rising and
-                current_elevation > elevation_threshold):
+            if (self.current_state == "morning" and is_rising and
+                    current_elevation > elevation_threshold):
 
-                self.log("Transitioning morning -> day (elevation {} > {}, rising)".format(
-                    current_elevation, elevation_threshold
-                ))
+                self.log(
+                    "Transitioning morning -> day (elevation {} > {}, rising)".format(
+                        current_elevation, elevation_threshold
+                    )
+                )
                 self.start_day(None)
 
             # Day to Evening transition
-            elif (self.current_state == "day" and
-                  not is_rising and
+            elif (self.current_state == "day" and not is_rising and
                   current_elevation < elevation_threshold):
 
-                self.log("Transitioning day -> evening (not rising, elevation {} < {})".format(
-                    current_elevation, elevation_threshold
-                ))
+                self.log(
+                    "Transitioning day -> evening (not rising, elevation {} < {})".format(
+                        current_elevation, elevation_threshold
+                    )
+                )
                 self.start_evening(None)
             else:
-                self.log("Day -> evening transition skipped: elevation {} >= {} or sun is rising".format(
-                    current_elevation, elevation_threshold
-                ))
+                self.log(
+                    "Day -> evening transition skipped: elevation {} >= {} or sun is rising".format(
+                        current_elevation, elevation_threshold
+                    )
+                )
 
         except Exception as e:
-            self.log("ERROR: Failed to process elevation-only transitions at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to process elevation-only transitions at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def calculate_state(self) -> str:
         """
@@ -605,7 +734,9 @@ class AutomaticLights(hass.Hass):
             ValueError: If time parsing fails
         """
         try:
-            self.log("Calculating initial state based on current time...")
+            self.log(
+                "Calculating initial state based on current time..."
+            )
 
             now = self.time()
             sunrise = self.sunrise().time()
@@ -615,17 +746,21 @@ class AutomaticLights(hass.Hass):
             try:
                 morning_start = self.parse_time(self.morning_start)
             except Exception as e:
-                self.log("ERROR: Invalid morning_start time format '{}': {} - using default {}".format(
-                    self.morning_start, e, DEFAULT_MORNING_START
-                ))
+                self.log(
+                    "ERROR: Invalid morning_start time format '{}': {} - using default {}".format(
+                        self.morning_start, e, DEFAULT_MORNING_START
+                    )
+                )
                 morning_start = self.parse_time(DEFAULT_MORNING_START)  # Default fallback
 
             try:
                 night_start = self.parse_time(self.night_start)
             except Exception as e:
-                self.log("ERROR: Invalid night_start time format '{}': {} - using default {}".format(
-                    self.night_start, e, DEFAULT_NIGHT_START
-                ))
+                self.log(
+                    "ERROR: Invalid night_start time format '{}': {} - using default {}".format(
+                        self.night_start, e, DEFAULT_NIGHT_START
+                    )
+                )
                 night_start = self.parse_time(DEFAULT_NIGHT_START)  # Default fallback
 
             # Determine state based on time relationships
@@ -643,16 +778,21 @@ class AutomaticLights(hass.Hass):
                 # Fallback - should never reach here
                 initial_state = "night"
 
-            self.log("Initial state: {} (now={}, sunrise={}, sunset={}, morning={}, night={})".format(
-                initial_state, now, sunrise, sunset, morning_start, night_start
-            ))
+            self.log(
+                "Initial state: {} (now={}, sunrise={}, sunset={}, morning={}, night={})".format(
+                    initial_state, now, sunrise, sunset, morning_start, night_start
+                )
+            )
 
             return initial_state
 
         except Exception as e:
-            self.log("ERROR: Failed to calculate initial state at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to calculate initial state at line {}: {}".format(
+                    line_num, e
+                )
+            )
             return "night"  # Safe fallback
 
     def start_morning(self, _kwargs: Optional[Dict[str, Any]]) -> None:
@@ -667,7 +807,9 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log("Morning scene activation requested")
+            self.log(
+                "Morning scene activation requested"
+            )
 
             def should_skip() -> bool:
                 """Check if morning scene should be skipped."""
@@ -675,22 +817,30 @@ class AutomaticLights(hass.Hass):
                     sun_state = self.sun_up()
                     should_skip = sun_state is None or sun_state or self.current_state == "day"
                     if should_skip:
-                        self.log("Morning scene skipped: sun_state={}, current_state={}".format(
-                            sun_state, self.current_state
-                        ))
+                        self.log(
+                            "Morning scene skipped: sun_state={}, current_state={}".format(
+                                sun_state, self.current_state
+                            )
+                        )
                     return should_skip
                 except Exception as e:
-                    self.log("ERROR: Failed to check sun state at line {}: {}".format(
-                        traceback.extract_stack()[-1].lineno, e
-                    ))
+                    line_num = traceback.extract_stack()[-1].lineno
+                    self.log(
+                        "ERROR: Failed to check sun state at line {}: {}".format(
+                            line_num, e
+                        )
+                    )
                     return False
 
             self._start_scene("morning", should_skip, "Sun is already up or already in day state, no morning needed")
 
         except Exception as e:
-            self.log("ERROR: Failed to start morning scene at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to start morning scene at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def start_day(self, _kwargs: Optional[Dict[str, Any]]) -> None:
         """
@@ -704,13 +854,18 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log("Day scene activation requested")
+            self.log(
+                "Day scene activation requested"
+            )
             self._start_scene("day")
 
         except Exception as e:
-            self.log("ERROR: Failed to start day scene at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to start day scene at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def start_evening(self, _kwargs: Optional[Dict[str, Any]]) -> None:
         """
@@ -723,21 +878,30 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log("Evening scene activation requested")
+            self.log(
+                "Evening scene activation requested"
+            )
 
             def should_skip() -> bool:
                 """Check if evening scene should be skipped."""
                 should_skip = self.current_state == "night"
                 if should_skip:
-                    self.log("Evening scene skipped: current_state={}".format(self.current_state))
+                    self.log(
+                        "Evening scene skipped: current_state={}".format(
+                            self.current_state
+                        )
+                    )
                 return should_skip
 
             self._start_scene("evening", should_skip, "Already in night state, no evening needed")
 
         except Exception as e:
-            self.log("ERROR: Failed to start evening scene at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to start evening scene at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def start_night(self, _kwargs: Optional[Dict[str, Any]]) -> None:
         """
@@ -750,13 +914,18 @@ class AutomaticLights(hass.Hass):
             _kwargs: Additional keyword arguments (unused)
         """
         try:
-            self.log("Night scene activation requested")
+            self.log(
+                "Night scene activation requested"
+            )
             self._start_scene("night")
 
         except Exception as e:
-            self.log("ERROR: Failed to start night scene at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to start night scene at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def activate_scene(self, scene_name: str, run_now: bool = False) -> None:
         """
@@ -782,19 +951,37 @@ class AutomaticLights(hass.Hass):
             ValueError: If scene configuration is invalid
         """
         try:
-            self.log("Scene activation requested: scene={}, run_now={}".format(scene_name, run_now))
+            self.log(
+                "Scene activation requested: scene={}, run_now={}".format(
+                    scene_name, run_now
+                )
+            )
 
             # Validate scene exists in configuration
             if scene_name not in self.scenes:
-                self.log("ERROR: Scene '{}' not found in configuration. Available scenes: {}".format(
-                    scene_name, list(self.scenes.keys())
-                ))
+                available_scenes = list(self.scenes.keys())
+                self.log(
+                    "ERROR: Scene '{}' not found in configuration. Available scenes: {}".format(
+                        scene_name, available_scenes
+                    )
+                )
                 return
 
-            # Update current state and Home Assistant entity
-            self.current_state = scene_name
-            self.set_state(TIME_STATE_ENTITY, state=scene_name)
-            self.log("State updated: current_state={}".format(scene_name))
+            # Update current state and Home Assistant entity (only if not already updated by _start_scene)
+            if self.current_state != scene_name:
+                self.current_state = scene_name
+                self.set_state(TIME_STATE_ENTITY, state=scene_name)
+                self.log(
+                    "State updated: current_state={}".format(
+                        scene_name
+                    )
+                )
+            else:
+                self.log(
+                    "Scene activation proceeding: scene={}".format(
+                        scene_name
+                    )
+                )
 
             # Refresh groups if cache is empty or expired (6 hours)
             self._refresh_group_cache_if_needed()
@@ -802,15 +989,22 @@ class AutomaticLights(hass.Hass):
             # Process scene configuration
             scene_config = self.scenes.get(scene_name, {})
             if not scene_config:
-                self.log("WARNING: Scene '{}' has no configuration".format(scene_name))
+                self.log(
+                    "WARNING: Scene '{}' has no configuration".format(
+                        scene_name
+                    )
+                )
                 return
 
             self._process_scene_configuration(scene_name, scene_config, run_now)
 
         except Exception as e:
-            self.log("ERROR: Failed to activate scene '{}' at line {}: {}".format(
-                scene_name, traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to activate scene '{}' at line {}: {}".format(
+                    scene_name, line_num, e
+                )
+            )
 
     def _refresh_group_cache_if_needed(self) -> None:
         """
@@ -821,22 +1015,35 @@ class AutomaticLights(hass.Hass):
         """
         try:
             if not self.groups or not self.groups_cache_time:
-                self.log("Group cache is empty or missing timestamp, refreshing...")
+                self.log(
+                    "Group cache is empty or missing timestamp, refreshing..."
+                )
                 self.get_groups()
             else:
                 # Calculate cache age using datetime objects
                 now = datetime.now()
                 cache_age = (now - self.groups_cache_time).total_seconds()
                 if cache_age > CACHE_EXPIRY_HOURS * 3600:  # Convert hours to seconds
-                    self.log("Group cache expired (age: {:.1f} hours), refreshing...".format(cache_age / 3600))
+                    self.log(
+                        "Group cache expired (age: {:.1f} hours), refreshing...".format(
+                            cache_age / 3600
+                        )
+                    )
                     self.get_groups()
                 else:
-                    self.log("Group cache is fresh (age: {:.1f} hours)".format(cache_age / 3600))
+                    self.log(
+                        "Group cache is fresh (age: {:.1f} hours)".format(
+                            cache_age / 3600
+                        )
+                    )
 
         except Exception as e:
-            self.log("ERROR: Failed to refresh group cache at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to refresh group cache at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def _process_scene_configuration(self, scene_name: str, scene_config: Dict[str, bool], run_now: bool) -> None:
         """
@@ -855,9 +1062,11 @@ class AutomaticLights(hass.Hass):
                 try:
                     # Validate group_state is a boolean
                     if not isinstance(group_state, bool):
-                        self.log("ERROR: Invalid group_state for group '{}' in scene '{}': {} (must be boolean)".format(
-                            group_name, scene_name, group_state
-                        ))
+                        self.log(
+                            "ERROR: Invalid group_state for group '{}' in scene '{}': {} (must be boolean)".format(
+                                group_name, scene_name, group_state
+                            )
+                        )
                         continue
 
                     # Get entities for this group
@@ -865,9 +1074,11 @@ class AutomaticLights(hass.Hass):
                     entities = self.groups.get(group_entity_id)
 
                     if entities is None:
-                        self.log("ERROR: No entities found for group '{}' in scene '{}'".format(
-                            group_name, scene_name
-                        ))
+                        self.log(
+                            "ERROR: No entities found for group '{}' in scene '{}'".format(
+                                group_name, scene_name
+                            )
+                        )
                         continue
 
                     # Control each entity in the group
@@ -889,24 +1100,35 @@ class AutomaticLights(hass.Hass):
                             success_count += 1
 
                         except Exception as e:
-                            self.log("ERROR: Failed to control entity '{}' at line {}: {}".format(
-                                entity, traceback.extract_stack()[-1].lineno, e
-                            ))
+                            line_num = traceback.extract_stack()[-1].lineno
+                            self.log(
+                                "ERROR: Failed to control entity '{}' at line {}: {}".format(
+                                    entity, line_num, e
+                                )
+                            )
 
                 except Exception as e:
-                    self.log("ERROR: Failed to process group '{}' at line {}: {}".format(
-                        group_name, traceback.extract_stack()[-1].lineno, e
-                    ))
+                    line_num = traceback.extract_stack()[-1].lineno
+                    self.log(
+                        "ERROR: Failed to process group '{}' at line {}: {}".format(
+                            group_name, line_num, e
+                        )
+                    )
                     continue
 
-            self.log("Scene '{}' activation completed: {}/{} entities controlled successfully".format(
-                scene_name, success_count, entity_count
-            ))
+            self.log(
+                "Scene '{}' activation completed: {}/{} entities controlled successfully".format(
+                    scene_name, success_count, entity_count
+                )
+            )
 
         except Exception as e:
-            self.log("ERROR: Failed to process scene configuration at line {}: {}".format(
-                traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to process scene configuration at line {}: {}".format(
+                    line_num, e
+                )
+            )
 
     def _turn_onoff(self, kwargs: Dict[str, Any]) -> None:
         """
@@ -926,15 +1148,19 @@ class AutomaticLights(hass.Hass):
             state = kwargs.get("state")
 
             if entity is None or state is None:
-                self.log("ERROR: Missing required parameters in _turn_onoff: entity={}, state={}".format(
-                    entity, state
-                ))
+                self.log(
+                    "ERROR: Missing required parameters in _turn_onoff: entity={}, state={}".format(
+                        entity, state
+                    )
+                )
                 return
 
             if not isinstance(state, bool):
-                self.log("ERROR: Invalid state type in _turn_onoff: entity={}, state={} (must be boolean)".format(
-                    entity, state
-                ))
+                self.log(
+                    "ERROR: Invalid state type in _turn_onoff: entity={}, state={} (must be boolean)".format(
+                        entity, state
+                    )
+                )
                 return
 
             # Control the entity with retry mechanism
@@ -948,18 +1174,23 @@ class AutomaticLights(hass.Hass):
 
                 except Exception as e:
                     if attempt < MAX_RETRIES - 1:
-                        self.log("WARNING: Failed to control entity '{}' (attempt {}/{}), retrying...".format(
-                            entity, attempt + 1, MAX_RETRIES
-                        ))
+                        self.log(
+                            "WARNING: Failed to control entity '{}' (attempt {}/{}), retrying...".format(
+                                entity, attempt + 1, MAX_RETRIES
+                            )
+                        )
                         # Small delay before retry
                         time.sleep(RETRY_DELAY)
                     else:
                         raise  # Re-raise on final attempt
 
         except Exception as e:
-            self.log("ERROR: Failed to control entity '{}' after retries at line {}: {}".format(
-                entity, traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to control entity '{}' after retries at line {}: {}".format(
+                    entity, line_num, e
+                )
+            )
 
     def _get_safe_state(self, entity: str, attribute: Optional[str] = None, log_name: Optional[str] = None) -> Optional[Union[str, Dict[str, Any]]]:
         """
@@ -981,16 +1212,23 @@ class AutomaticLights(hass.Hass):
 
             if state is None or state == "unavailable":
                 log_msg = log_name or entity
-                self.log("Entity unavailable: {} = {}".format(log_msg, state))
+                self.log(
+                    "Entity unavailable: {} = {}".format(
+                        log_msg, state
+                    )
+                )
                 return None
 
             return state
 
         except Exception as e:
             log_msg = log_name or entity
-            self.log("ERROR: Failed to get state for '{}' at line {}: {}".format(
-                log_msg, traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to get state for '{}' at line {}: {}".format(
+                    log_msg, line_num, e
+                )
+            )
             return None
 
     def _start_scene(self, scene_name: str, validation_func: Optional[Callable[[], bool]] = None, skip_message: Optional[str] = None) -> None:
@@ -1007,28 +1245,53 @@ class AutomaticLights(hass.Hass):
             skip_message: Message to log if validation fails and scene is skipped
         """
         try:
+            # Always update the current state first, regardless of validation
+            self.current_state = scene_name
+            self.set_state(TIME_STATE_ENTITY, state=scene_name)
+            self.log(
+                "State updated: current_state={}".format(
+                    scene_name
+                )
+            )
+
             # Run validation if provided
             if validation_func is not None:
                 try:
                     should_skip = validation_func()
                     if should_skip:
                         if skip_message:
-                            self.log(skip_message)
+                            self.log(
+                                skip_message
+                            )
                         else:
-                            self.log("Scene '{}' activation skipped by validation function".format(scene_name))
+                            self.log(
+                                "Scene '{}' activation skipped by validation function".format(
+                                    scene_name
+                                )
+                            )
                         return
                 except Exception as e:
-                    self.log("ERROR: Validation function failed for scene '{}' at line {}: {}".format(
-                        scene_name, traceback.extract_stack()[-1].lineno, e
-                    ))
+                    line_num = traceback.extract_stack()[-1].lineno
+                    self.log(
+                        "ERROR: Validation function failed for scene '{}' at line {}: {}".format(
+                            scene_name, line_num, e
+                        )
+                    )
                     # Continue with scene activation even if validation fails
 
             # Activate the scene
-            self.log("Starting scene: {}".format(scene_name))
+            self.log(
+                "Starting scene: {}".format(
+                    scene_name
+                )
+            )
             self.activate_scene(scene_name)
 
         except Exception as e:
-            self.log("ERROR: Failed to start scene '{}' at line {}: {}".format(
-                scene_name, traceback.extract_stack()[-1].lineno, e
-            ))
+            line_num = traceback.extract_stack()[-1].lineno
+            self.log(
+                "ERROR: Failed to start scene '{}' at line {}: {}".format(
+                    scene_name, line_num, e
+                )
+            )
 
