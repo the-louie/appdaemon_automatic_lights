@@ -64,14 +64,11 @@ class AutomaticLights(hass.Hass):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Debouncing for state changes to prevent excessive processing
         self.last_state_change_time = 0
-        self.state_change_debounce_seconds = 60  # Minimum 60 seconds between state changes
-
-        # Sensor data caching
+        self.state_change_debounce_seconds = 60
         self.sensor_cache = {}
         self.sensor_cache_time = {}
-        self.sensor_cache_duration = 60  # Cache sensor data for 60 seconds
+        self.sensor_cache_duration = 60
 
     def initialize(self) -> None:
         """Initialize the automatic lights app."""
@@ -102,7 +99,6 @@ class AutomaticLights(hass.Hass):
                 self.log("ERROR: night_start is required, format: HH:MM - using default {}".format(DEFAULT_NIGHT_START))
                 self.night_start = DEFAULT_NIGHT_START
 
-            # Validate time format by attempting to parse
             self.parse_time(self.morning_start)
             self.parse_time(self.night_start)
 
@@ -247,8 +243,6 @@ class AutomaticLights(hass.Hass):
                 return
 
             self.groups = {}
-            group_count = 0
-            entity_count = 0
 
             for group_id, group_data in state_groups.items():
                 try:
@@ -259,8 +253,6 @@ class AutomaticLights(hass.Hass):
                         continue
 
                     self.groups[group_id] = entities
-                    group_count += 1
-                    entity_count += len(entities)
 
                 except Exception as e:
                     line_num = traceback.extract_stack()[-1].lineno
@@ -431,8 +423,6 @@ class AutomaticLights(hass.Hass):
                 initial_state = "day"
             elif now >= sunset and now < night_start:
                 initial_state = "evening"
-            elif now >= night_start:
-                initial_state = "night"
             else:
                 initial_state = "night"
 
@@ -600,9 +590,6 @@ class AutomaticLights(hass.Hass):
     def _process_scene_configuration(self, scene_name: str, scene_config: Dict[str, bool], run_now: bool) -> None:
         """Process scene configuration and control individual entities."""
         try:
-            entity_count = 0
-            success_count = 0
-
             for group_name, group_state in scene_config.items():
                 try:
                     if not isinstance(group_state, bool):
@@ -617,13 +604,10 @@ class AutomaticLights(hass.Hass):
                         self.log("ERROR: No entities found for group '{}' in scene '{}'".format(group_name, scene_name))
                         continue
 
-                    entity_count += len(entities)
-
                     if run_now:
                         for entity in entities:
                             try:
                                 self._turn_onoff({"entity": entity, "state": group_state})
-                                success_count += 1
                             except Exception as e:
                                 line_num = traceback.extract_stack()[-1].lineno
                                 self.log("ERROR: Failed to control entity '{}' at line {}: {}".format(entity, line_num, e))
@@ -632,7 +616,6 @@ class AutomaticLights(hass.Hass):
                             try:
                                 delay = (i * 0.1) % (RANDOM_DELAY_SECONDS / 10)
                                 self.run_in(self._turn_onoff, delay, entity=entity, state=group_state)
-                                success_count += 1
                             except Exception as e:
                                 line_num = traceback.extract_stack()[-1].lineno
                                 self.log("ERROR: Failed to schedule entity '{}' at line {}: {}".format(entity, line_num, e))
