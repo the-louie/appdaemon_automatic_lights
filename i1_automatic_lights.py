@@ -431,6 +431,7 @@ class AutomaticLights(hass.Hass):
             elif sensor_data is not None and current_elevation is not None and is_rising is not None:
                 initial_state = self._enhance_state_with_elevation_only(initial_state, current_elevation, is_rising)
 
+            self.log("Initial state: {}".format(initial_state))
             return initial_state
 
         except Exception as e:
