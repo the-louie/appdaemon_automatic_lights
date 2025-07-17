@@ -12,7 +12,7 @@ Licensed under BSD 2-Clause License
 import time
 import traceback
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 import appdaemon.plugins.hass.hassapi as hass
 
@@ -79,11 +79,9 @@ class AutomaticLights(hass.Hass):
         self._setup_scheduled_events()
 
         solar_status = "enabled" if self.solar_radiation else "disabled"
-        self.log(
-            "AutomaticLights initialized: morning={}, night={}, solar_radiation={}, scenes={}".format(
-                self.morning_start, self.night_start, solar_status, len(self.scenes)
-            )
-        )
+        self.log("AutomaticLights initialized: morning={}, night={}, solar_radiation={}, scenes={}".format(
+            self.morning_start, self.night_start, solar_status, len(self.scenes)
+        ))
 
     def _initialize_time_config(self) -> None:
         """Initialize and validate time-based configuration."""
@@ -148,7 +146,7 @@ class AutomaticLights(hass.Hass):
         """Initialize state tracking and group caching."""
         try:
             self.current_state = self.calculate_state()
-            self.groups: Dict[str, List[str]] = {}
+            self.groups: Dict[str, list[str]] = {}
             self.groups_cache_time: Optional[datetime] = None
             self.get_groups()
             self.scenes = self.args.get("scenes", {})
@@ -431,7 +429,6 @@ class AutomaticLights(hass.Hass):
             elif sensor_data is not None and current_elevation is not None and is_rising is not None:
                 initial_state = self._enhance_state_with_elevation_only(initial_state, current_elevation, is_rising)
 
-            self.log("Initial state: {}".format(initial_state))
             return initial_state
 
         except Exception as e:
@@ -499,7 +496,6 @@ class AutomaticLights(hass.Hass):
                 sun_state = self.sun_up()
 
                 if sun_state is None:
-                    self.log("Morning scene skipped: sun state unavailable, no state change")
                     return
 
                 should_skip = sun_state or self.current_state == "day"
@@ -679,8 +675,6 @@ class AutomaticLights(hass.Hass):
             state = self.get_state(entity, attribute=attribute)
 
             if state is None or state == "unavailable":
-                log_msg = log_name or entity
-                self.log("Entity unavailable: {} = {}".format(log_msg, state))
                 return None
 
             self.sensor_cache[cache_key] = state
