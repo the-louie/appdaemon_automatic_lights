@@ -15,6 +15,13 @@ automatic_lights:
     threshold: 500
     elevation_threshold: 3.0
 
+  # Staggering configuration for natural light transitions
+  staggering:
+    light_delay_min: 2    # seconds between individual lights in the same area
+    light_delay_max: 5    # seconds between individual lights in the same area
+    room_delay_min: 30    # seconds between different areas
+    room_delay_max: 120   # seconds between different areas
+
   # Scene configurations
   scenes:
     night:

@@ -1,702 +1,443 @@
 """
 Automatic Lights - Home Assistant AppDaemon App
-
-This module provides intelligent lighting control based on time, sun position,
-and optional solar radiation sensors. It manages four distinct lighting modes
-throughout the day with seamless transitions based on environmental conditions.
-
 Copyright (c) 2025 the_louie
-Licensed under BSD 2-Clause License
 """
 
+import random
 import time
-import traceback
-from datetime import datetime
-from typing import Any, Dict, Optional, Union
+from typing import Dict, List
 
 import appdaemon.plugins.hass.hassapi as hass
 
-# Constants
+# Configuration defaults
 DEFAULT_ELEVATION_THRESHOLD = 3.0
-CACHE_EXPIRY_HOURS = 6
-MAX_RETRIES = 1
-RETRY_DELAY = 0.1
 DEFAULT_MORNING_START = "05:30"
 DEFAULT_NIGHT_START = "23:30"
-RANDOM_DELAY_SECONDS = 600
-SCENE_PREFIX = "scene."
-GROUP_PREFIX = "group."
-TIME_STATE_ENTITY = "irisone.time_state"
+LIGHT_DELAY_MAX = 5
+LIGHT_DELAY_MIN = 2
+ROOM_DELAY_MAX = 120
+ROOM_DELAY_MIN = 30
+
+# Entity constants
 SUN_ELEVATION_SENSOR = "sensor.sun_solar_elevation"
 SUN_RISING_SENSOR = "sensor.sun_solar_rising"
-MORNING_RANDOM_START = -45 * 60
-MORNING_RANDOM_END = -30 * 60
-NIGHT_RANDOM_START = -15 * 60
-NIGHT_RANDOM_END = 10 * 60
+TIME_STATE_ENTITY = "irisone.time_state"
 
 
 class AutomaticLights(hass.Hass):
-    """
-    Home Assistant AppDaemon app for automatic lighting control.
-
-    This app manages lighting scenes throughout the day based on:
-    - Time-based triggers (morning and night)
-    - Sun position and solar radiation levels
-    - Manual scene activation
-
-    The app provides four lighting modes:
-    - Night: Low ambient lighting for late night hours
-    - Morning: Gentle wake-up lighting before sunrise
-    - Day: Full lighting during daylight hours
-    - Evening: Transitional lighting as daylight fades
-
-    Configuration Parameters:
-        morning_start (str): Time to start morning scene (format: HH:MM)
-        night_start (str): Time to start night scene (format: HH:MM)
-        solar_radiation (dict, optional): Solar radiation configuration
-        scenes (dict): Scene configurations mapping groups to states
-
-    Solar Radiation Configuration:
-        sensor (str): Entity ID of the light level sensor
-        threshold (float): Light level threshold for transitions
-        elevation_threshold (float, optional): Solar elevation threshold (default: 3)
-    """
+    """Automatic lighting control based on time and sun position."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.last_state_change_time = 0
-        self.state_change_debounce_seconds = 60
-        self.sensor_cache = {}
-        self.sensor_cache_time = {}
-        self.sensor_cache_duration = 60
+        self.current_state = "night"
+        self.groups = {}
+        self.last_state_change = 0
+        self.areas = []
+        self.area_entities = {}
+        self.entity_to_area = {}  # Cache for O(1) entity lookup
+        self.group_area_entities = {}  # group_id -> {area: [entities]}
 
-    def initialize(self) -> None:
-        """Initialize the automatic lights app."""
-        self._initialize_time_config()
-        self._initialize_solar_radiation_config()
-        self._initialize_state_and_cache()
-        self._register_event_listeners()
-        self._setup_scheduled_events()
+    def initialize(self):
+        """Initialize the app."""
+        self.log("[A001] Starting initialization")
 
-        solar_status = "enabled" if self.solar_radiation else "disabled"
-        self.log("AutomaticLights initialized: morning={}, night={}, solar_radiation={}, scenes={}".format(
-            self.morning_start, self.night_start, solar_status, len(self.scenes)
-        ))
+        # Configuration
+        self.morning_start = self.args.get("morning_start", DEFAULT_MORNING_START)
+        self.night_start = self.args.get("night_start", DEFAULT_NIGHT_START)
+        self.scenes = self.args.get("scenes", {})
 
-    def _initialize_time_config(self) -> None:
-        """Initialize and validate time-based configuration."""
-        try:
-            self.morning_start = str(self.args.get("morning_start", DEFAULT_MORNING_START))
-            self.night_start = str(self.args.get("night_start", DEFAULT_NIGHT_START))
+        # Solar radiation config
+        solar_config = self.args.get("solar_radiation", {})
+        self.solar_sensor = solar_config.get("sensor")
+        self.solar_threshold = solar_config.get("threshold")
+        self.elevation_threshold = solar_config.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
 
-            if not self.morning_start or self.morning_start == "None":
-                self.log("ERROR: morning_start is required, format: HH:MM - using default {}".format(DEFAULT_MORNING_START))
-                self.morning_start = DEFAULT_MORNING_START
+        # Validate solar threshold
+        if self.solar_threshold is not None:
+            try:
+                self.solar_threshold = float(self.solar_threshold)
+            except (ValueError, TypeError):
+                self.log("[A004] WARNING: Invalid solar threshold, disabling solar radiation")
+                self.solar_sensor = None
+                self.solar_threshold = None
 
-            if not self.night_start or self.night_start == "None":
-                self.log("ERROR: night_start is required, format: HH:MM - using default {}".format(DEFAULT_NIGHT_START))
-                self.night_start = DEFAULT_NIGHT_START
+        # Staggering config
+        stagger_config = self.args.get("staggering", {})
+        self.light_delay_min = stagger_config.get("light_delay_min", LIGHT_DELAY_MIN)
+        self.light_delay_max = stagger_config.get("light_delay_max", LIGHT_DELAY_MAX)
+        self.room_delay_min = stagger_config.get("room_delay_min", ROOM_DELAY_MIN)
+        self.room_delay_max = stagger_config.get("room_delay_max", ROOM_DELAY_MAX)
 
-            self.parse_time(self.morning_start)
-            self.parse_time(self.night_start)
+        self.log("[A002] Configuration loaded: morning={}, night={}, "
+                "light_delay={}-{}s, area_delay={}-{}s".format(
+                    self.morning_start, self.night_start,
+                    self.light_delay_min, self.light_delay_max,
+                    self.room_delay_min, self.room_delay_max))
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to initialize time configuration at line {}: {}".format(line_num, e))
-            raise ValueError("Invalid time configuration") from e
+        # Setup
+        self._setup_groups_and_areas()
+        self.current_state = self._calculate_state()
 
-    def _initialize_solar_radiation_config(self) -> None:
-        """Initialize and validate solar radiation configuration."""
-        self.solar_radiation = self.args.get("solar_radiation")
+        # Register listeners
+        self.listen_state(self._handle_sun_pos, SUN_ELEVATION_SENSOR)
+        self.listen_event(self._handle_manual_scene, event='call_service', domain='scene')
 
-        if not self.solar_radiation:
+        # Schedule daily events
+        self.run_daily(self._start_morning, self.morning_start, random_start=-45*60, random_end=-30*60)
+        self.run_daily(self._start_night, self.night_start, random_start=-15*60, random_end=10*60)
+
+        # Activate initial scene
+        if self.current_state in self.scenes:
+            self._activate_scene(self.current_state, run_now=True)
+
+        self.log("[A003] Initialization complete: state={}".format(self.current_state))
+
+    def _setup_groups_and_areas(self):
+        """Setup groups and area mapping."""
+        self.log("[B001] Starting groups and areas setup")
+
+        # Get groups and collect all configured entities
+        configured_entities = set()
+        state_groups = self.get_state("group")
+        if isinstance(state_groups, dict):
+            for group_id, group_data in state_groups.items():
+                entities = group_data.get("attributes", {}).get("entity_id", [])
+                if isinstance(entities, list):
+                    self.groups[group_id] = entities
+                    self.log("[B002] Group {}: {} entities".format(group_id, len(entities)))
+        else:
+            self.log("[B003] WARNING: No groups found or invalid format")
+
+        # Collect all entities from configured groups
+        for scene_config in self.scenes.values():
+            for group_name in scene_config.keys():
+                group_entity_id = f"group.{group_name}"
+                if group_entity_id in self.groups:
+                    configured_entities.update(self.groups[group_entity_id])
+
+        self.log("[B004] Found {} entities in configured groups".format(len(configured_entities)))
+
+        # Get areas and their entities
+        self.log("[B005] Fetching areas from Home Assistant")
+        self.areas = self.areas()
+        self.log("[B006] Found {} areas: {}".format(len(self.areas), self.areas))
+
+        # Initialize group-area-entities lookup
+        for scene_config in self.scenes.values():
+            for group_name in scene_config.keys():
+                group_entity_id = f"group.{group_name}"
+                if group_entity_id in self.groups:
+                    self.group_area_entities[group_entity_id] = {}
+
+        for area in self.areas:
+            # Get entities from the area and filter them to only include entities in configured groups
+            all_area_entities = self.area_entities(area)
+            if all_area_entities:
+                # Filter to only include configured entities
+                filtered_area_entities = [entity for entity in all_area_entities if entity in configured_entities]
+                self.area_entities[area] = filtered_area_entities
+
+                # Cache entity-to-area mapping for filtered entities
+                for entity in filtered_area_entities:
+                    self.entity_to_area[entity] = area
+
+                # Build group-area-entities lookup
+                for group_entity_id, group_entities in self.groups.items():
+                    if group_entity_id in self.group_area_entities:
+                        # Find entities from this group that are in this area
+                        group_entities_in_area = [entity for entity in filtered_area_entities if entity in group_entities]
+                        if group_entities_in_area:
+                            self.group_area_entities[group_entity_id][area] = group_entities_in_area
+
+                self.log("[B007] Area '{}': {} entities ({} configured, {} total)".format(
+                    area, len(filtered_area_entities), len(filtered_area_entities), len(all_area_entities)))
+            else:
+                self.log("[B008] Area '{}': No entities found".format(area))
+
+        # Log group-area-entities summary
+        for group_entity_id, area_entities in self.group_area_entities.items():
+            total_entities = sum(len(entities) for entities in area_entities.values())
+            self.log("[B010] Group {}: {} entities across {} areas".format(
+                group_entity_id, total_entities, len(area_entities)))
+
+        self.log("[B009] Areas setup complete: {} areas with entities, {} entities cached".format(
+            len(self.area_entities), len(self.entity_to_area)))
+
+    def _get_entities_by_area(self, target_entities: List[str]) -> Dict[str, List[str]]:
+        """Group target entities by their area using O(1) lookup."""
+        self.log("[C001] Grouping {} entities by area".format(len(target_entities)))
+        area_groups = {}
+
+        for entity_id in target_entities:
+            # Use cached lookup for O(1) performance
+            area = self.entity_to_area.get(entity_id, "unknown")
+            area_groups.setdefault(area, []).append(entity_id)
+            self.log("[C002] Entity {} -> Area '{}'".format(entity_id, area))
+
+        # Log summary
+        for area, entities in area_groups.items():
+            self.log("[C004] Area '{}': {} entities to control".format(area, len(entities)))
+
+        return area_groups
+
+    def _get_group_entities_by_area(self, group_entity_id: str) -> Dict[str, List[str]]:
+        """Get entities from a specific group grouped by area."""
+        if group_entity_id not in self.group_area_entities:
+            self.log("[C005] Group {} not found in area-entities lookup".format(group_entity_id))
+            return {}
+
+        area_entities = self.group_area_entities[group_entity_id]
+        self.log("[C006] Group {}: {} entities across {} areas".format(
+            group_entity_id, sum(len(entities) for entities in area_entities.values()), len(area_entities)))
+
+        return area_entities
+
+    def _handle_manual_scene(self, event_name, data, kwargs):
+        """Handle manual scene activation."""
+        self.log("[D001] Manual scene activation triggered")
+
+        service_data = data.get("service_data", {})
+        scene_entity = service_data.get("entity_id")
+
+        if not scene_entity:
+            self.log("[D002] No scene entity found in service data")
+            return
+
+        scene_entities = scene_entity if isinstance(scene_entity, list) else [scene_entity]
+        self.log("[D003] Processing {} scene entities".format(len(scene_entities)))
+
+        for scene_entity in scene_entities:
+            if scene_entity.startswith("scene."):
+                scene_name = scene_entity.replace("scene.", "")
+                if scene_name in self.scenes:
+                    self.log("[D004] Activating scene '{}'".format(scene_name))
+                    self._activate_scene(scene_name, run_now=True)
+                else:
+                    self.log("[D005] Scene '{}' not found in configuration".format(scene_name))
+
+    def _handle_sun_pos(self, entity, attribute, old, new, kwargs):
+        """Handle sun position changes."""
+        current_time = time.time()
+        if current_time - self.last_state_change < 60:
+            return
+        self.last_state_change = current_time
+
+        elevation_state = self.get_state(SUN_ELEVATION_SENSOR)
+        rising_state = self.get_state(SUN_RISING_SENSOR)
+
+        if not elevation_state or not rising_state:
             return
 
         try:
-            if not isinstance(self.solar_radiation, dict):
-                self.log("ERROR: solar_radiation must be a dictionary - disabling solar radiation monitoring")
-                self.solar_radiation = None
-                return
+            current_elevation = float(elevation_state)
+            is_rising = rising_state.lower() in ('true', '1', 'yes', 'on') if isinstance(rising_state, str) else rising_state
+        except (ValueError, TypeError):
+            return
 
-            required_keys = ["sensor", "threshold"]
-            if not all(key in self.solar_radiation for key in required_keys):
-                self.log("ERROR: solar_radiation must contain 'sensor' and 'threshold' keys - disabling monitoring")
-                self.solar_radiation = None
-                return
+        # Process transitions
+        if self.solar_sensor and self.solar_threshold is not None:
+            self._process_solar_transitions(current_elevation, is_rising)
+        else:
+            self._process_elevation_transitions(current_elevation, is_rising)
 
-            threshold = self.solar_radiation.get("threshold")
-            if threshold is None:
-                self.log("ERROR: solar_radiation threshold cannot be None - disabling solar radiation monitoring")
-                self.solar_radiation = None
-                return
+    def _process_solar_transitions(self, current_elevation, is_rising):
+        """Process transitions with solar radiation."""
+        light_state = self.get_state(self.solar_sensor, attribute="state")
+        if not light_state:
+            return
 
-            try:
-                float(threshold)
-            except (ValueError, TypeError):
-                self.log("ERROR: solar_radiation threshold must be a numeric value - disabling monitoring")
-                self.solar_radiation = None
-                return
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to initialize solar radiation configuration at line {}: {}".format(line_num, e))
-            self.solar_radiation = None
-
-    def _initialize_state_and_cache(self) -> None:
-        """Initialize state tracking and group caching."""
         try:
-            self.current_state = self.calculate_state()
-            self.groups: Dict[str, list[str]] = {}
-            self.groups_cache_time: Optional[datetime] = None
-            self.get_groups()
-            self.scenes = self.args.get("scenes", {})
+            light_level = float(light_state)
+        except (ValueError, TypeError):
+            return
 
-            if self.current_state in self.scenes:
-                self.activate_scene(self.current_state, run_now=True)
-            else:
-                self.log("WARNING: No scene configuration found for initial state: {}".format(self.current_state))
+        if (self.current_state == "morning" and is_rising and
+                current_elevation > self.elevation_threshold and light_level > self.solar_threshold):
+            self._start_day()
+        elif (self.current_state == "day" and not is_rising and
+                (light_level < self.solar_threshold or current_elevation < self.elevation_threshold)):
+            self._start_evening()
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to initialize state and cache at line {}: {}".format(line_num, e))
-            raise
+    def _process_elevation_transitions(self, current_elevation, is_rising):
+        """Process transitions with elevation only."""
+        if (self.current_state == "morning" and is_rising and
+                current_elevation > self.elevation_threshold):
+            self._start_day()
+        elif (self.current_state == "day" and not is_rising and
+                current_elevation < self.elevation_threshold):
+            self._start_evening()
 
-    def _register_event_listeners(self) -> None:
-        """Register event listeners for sensor changes and manual scene activation."""
-        try:
-            self.listen_state(self.sun_pos, SUN_ELEVATION_SENSOR)
-            self.listen_event(self.manual_scene, event='call_service', domain='scene')
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to register event listeners at line {}: {}".format(line_num, e))
-            raise
+    def _calculate_state(self):
+        """Calculate initial state based on time and sun."""
+        now = self.time()
+        sunrise = self.sunrise().time()
+        sunset = self.sunset().time()
 
-    def _setup_scheduled_events(self) -> None:
-        """Set up scheduled daily events for time-based transitions."""
-        try:
-            self.run_daily(
-                self.start_morning, self.morning_start,
-                random_start=MORNING_RANDOM_START, random_end=MORNING_RANDOM_END
-            )
-            self.run_daily(
-                self.start_night, self.night_start,
-                random_start=NIGHT_RANDOM_START, random_end=NIGHT_RANDOM_END
-            )
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to setup scheduled events at line {}: {}".format(line_num, e))
-            raise
+        morning_start = self.parse_time(self.morning_start)
+        night_start = self.parse_time(self.night_start)
 
-    def manual_scene(self, event_name: str, data: Dict[str, Any], kwargs: Dict[str, Any]) -> None:
-        """Handle manual scene activation events from Home Assistant."""
-        try:
-            service_data = data.get("service_data", {})
-            scene_entity = service_data.get("entity_id")
-
-            if scene_entity is None:
-                self.log("ERROR: No entity_id found in manual scene event data")
-                return
-
-            if isinstance(scene_entity, list):
-                scene_entities = scene_entity
-            else:
-                scene_entities = [scene_entity]
-
-            for scene_entity in scene_entities:
-                try:
-                    if not scene_entity.startswith(SCENE_PREFIX):
-                        self.log("WARNING: Invalid scene entity_id format: {}".format(scene_entity))
-                        continue
-
-                    scene_name = scene_entity.replace(SCENE_PREFIX, "")
-
-                    if not scene_name:
-                        self.log("ERROR: Invalid scene entity_id: {}".format(scene_entity))
-                        continue
-
-                    if scene_name not in self.scenes:
-                        available_scenes = list(self.scenes.keys())
-                        self.log("ERROR: Scene '{}' not found in configuration. Available scenes: {}".format(
-                            scene_name, available_scenes))
-                        continue
-
-                    self.activate_scene(scene_name, run_now=True)
-
-                except Exception as e:
-                    line_num = traceback.extract_stack()[-1].lineno
-                    self.log("ERROR: Failed to process scene entity '{}' at line {}: {}".format(
-                        scene_entity, line_num, e))
-                    continue
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to handle manual scene event at line {}: {}".format(line_num, e))
-
-    def get_groups(self) -> None:
-        """Retrieve and cache all Home Assistant groups."""
-        try:
-            state_groups = self._get_safe_state("group", log_name="Groups")
-            if state_groups is None or not isinstance(state_groups, dict):
-                self.log("ERROR: Failed to retrieve groups from Home Assistant or invalid format")
-                return
-
-            self.groups = {}
-
-            for group_id, group_data in state_groups.items():
-                try:
-                    entities = group_data.get("attributes", {}).get("entity_id", [])
-
-                    if not isinstance(entities, list):
-                        self.log("WARNING: Invalid entity list for group {}: {}".format(group_id, entities))
-                        continue
-
-                    self.groups[group_id] = entities
-
-                except Exception as e:
-                    line_num = traceback.extract_stack()[-1].lineno
-                    self.log("ERROR: Failed to process group {} at line {}: {}".format(group_id, line_num, e))
-                    continue
-
-            self.groups_cache_time = datetime.now()
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to get groups at line {}: {}".format(line_num, e))
-
-    def sun_pos(self, entity: str, attribute: str, old: str, new: str, kwargs: Dict[str, Any]) -> None:
-        """Handle sun position state changes and manage runtime state transitions."""
-        try:
-            current_time = time.time()
-            if current_time - self.last_state_change_time < self.state_change_debounce_seconds:
-                return
-            self.last_state_change_time = current_time
-
-            sensor_data = self._get_sensor_data()
-            if sensor_data is None:
-                return
-
-            current_elevation, is_rising = sensor_data
-
-            if self.solar_radiation:
-                self._process_solar_radiation_transitions(current_elevation, is_rising)
-            else:
-                self._process_elevation_only_transitions(current_elevation, is_rising)
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to process sun position change at line {}: {}".format(line_num, e))
-
-    def _get_sensor_data(self) -> Optional[tuple[float, bool]]:
-        """Retrieve and validate sensor data for sun position calculations."""
-        try:
-            elevation_state = self._get_safe_state(SUN_ELEVATION_SENSOR, log_name="Solar elevation sensor")
-            if elevation_state is None or not isinstance(elevation_state, str):
-                return None
-
-            rising_state = self._get_safe_state(SUN_RISING_SENSOR, log_name="Sun rising sensor")
-            if rising_state is None:
-                return None
-
-            try:
-                current_elevation = float(elevation_state)
-            except (ValueError, TypeError) as e:
-                line_num = traceback.extract_stack()[-1].lineno
-                self.log("ERROR: Failed to convert elevation value '{}' to float at line {}: {}".format(
-                    elevation_state, line_num, e))
-                return None
-
-            if isinstance(rising_state, bool):
-                is_rising = rising_state
-            elif isinstance(rising_state, str):
-                is_rising = rising_state.lower() in ('true', '1', 'yes', 'on')
-            else:
-                line_num = traceback.extract_stack()[-1].lineno
-                self.log("ERROR: Invalid rising state type '{}' at line {}: expected bool or string".format(
-                    type(rising_state), line_num))
-                return None
-
-            return current_elevation, is_rising
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to retrieve sensor data at line {}: {}".format(line_num, e))
-            return None
-
-    def _process_solar_radiation_transitions(self, current_elevation: float, is_rising: bool) -> None:
-        """Process state transitions when solar radiation monitoring is enabled."""
-        try:
-            if not self.solar_radiation or not isinstance(self.solar_radiation, dict):
-                return
-
-            sensor_id = self.solar_radiation.get("sensor")
-            if not sensor_id:
-                return
-
-            light_state = self._get_safe_state(sensor_id, attribute="state", log_name="Light level sensor")
-            if light_state is None or not isinstance(light_state, str):
-                return
-
-            try:
-                light_level = float(light_state)
-            except (ValueError, TypeError) as e:
-                line_num = traceback.extract_stack()[-1].lineno
-                self.log("ERROR: Failed to convert light level '{}' to float at line {}: {}".format(
-                    light_state, line_num, e))
-                return
-
-            threshold = self.solar_radiation.get("threshold")
-            elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
-
-            if threshold is None:
-                return
-
-            try:
-                threshold = float(threshold)
-            except (ValueError, TypeError) as e:
-                line_num = traceback.extract_stack()[-1].lineno
-                self.log("ERROR: Failed to convert threshold '{}' to float at line {}: {}".format(
-                    self.solar_radiation.get("threshold"), line_num, e))
-                return
-
-            if (self.current_state == "morning" and is_rising and
-                    current_elevation > elevation_threshold and light_level > threshold):
-                self.start_day(None)
-
-            elif self.current_state == "day" and not is_rising:
-                if light_level < threshold or current_elevation < elevation_threshold:
-                    self.start_evening(None)
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to process solar radiation transitions at line {}: {}".format(line_num, e))
-
-    def _process_elevation_only_transitions(self, current_elevation: float, is_rising: bool) -> None:
-        """Process state transitions when solar radiation monitoring is disabled."""
-        try:
-            elevation_threshold = DEFAULT_ELEVATION_THRESHOLD
-
-            if (self.current_state == "morning" and is_rising and current_elevation > elevation_threshold):
-                self.start_day(None)
-
-            elif (self.current_state == "day" and not is_rising and current_elevation < elevation_threshold):
-                self.start_evening(None)
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to process elevation-only transitions at line {}: {}".format(line_num, e))
-
-    def calculate_state(self) -> str:
-        """Calculate the initial state based on time, sun position, and solar radiation."""
-        try:
-            now = self.time()
-            sunrise = self.sunrise().time()
-            sunset = self.sunset().time()
-
-            try:
-                morning_start = self.parse_time(self.morning_start)
-            except Exception as e:
-                self.log("ERROR: Invalid morning_start time format '{}': {} - using default {}".format(
-                    self.morning_start, e, DEFAULT_MORNING_START))
-                morning_start = self.parse_time(DEFAULT_MORNING_START)
-
-            try:
-                night_start = self.parse_time(self.night_start)
-            except Exception as e:
-                self.log("ERROR: Invalid night_start time format '{}': {} - using default {}".format(
-                    self.night_start, e, DEFAULT_NIGHT_START))
-                night_start = self.parse_time(DEFAULT_NIGHT_START)
-
-            sensor_data = self._get_sensor_data()
-            current_elevation = None
-            is_rising = None
-
-            if sensor_data is not None:
-                current_elevation, is_rising = sensor_data
-
-            if now <= sunrise and now <= morning_start:
-                initial_state = "night"
-            elif now > morning_start and now < sunrise:
-                initial_state = "morning"
-            elif now >= sunrise and now < sunset:
-                initial_state = "day"
-            elif now >= sunset and now < night_start:
-                initial_state = "evening"
-            else:
-                initial_state = "night"
-
-            if sensor_data is not None and self.solar_radiation and current_elevation is not None and is_rising is not None:
-                initial_state = self._enhance_state_with_solar_radiation(initial_state, current_elevation, is_rising)
-            elif sensor_data is not None and current_elevation is not None and is_rising is not None:
-                initial_state = self._enhance_state_with_elevation_only(initial_state, current_elevation, is_rising)
-
-            return initial_state
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to calculate initial state at line {}: {}".format(line_num, e))
+        if now <= sunrise and now <= morning_start:
+            return "night"
+        elif now > morning_start and now < sunrise:
+            return "morning"
+        elif now >= sunrise and now < sunset:
+            return "day"
+        elif now >= sunset and now < night_start:
+            return "evening"
+        else:
             return "night"
 
-    def _enhance_state_with_solar_radiation(self, initial_state: str, current_elevation: float, is_rising: bool) -> str:
-        """Enhance state calculation with solar radiation data."""
-        try:
-            if not self.solar_radiation:
-                return initial_state
-
-            light_state = self._get_safe_state(
-                self.solar_radiation.get("sensor"),
-                attribute="state",
-                log_name="Light level sensor"
-            )
-            if light_state is None or not isinstance(light_state, str):
-                return initial_state
-
-            light_level = float(light_state)
-            threshold = self.solar_radiation.get("threshold")
-            elevation_threshold = self.solar_radiation.get("elevation_threshold", DEFAULT_ELEVATION_THRESHOLD)
-
-            if initial_state == "day":
-                if light_level < threshold or (not is_rising and current_elevation < elevation_threshold):
-                    return "evening"
-
-            elif initial_state == "evening":
-                if light_level > threshold and is_rising and current_elevation > elevation_threshold:
-                    return "day"
-
-            return initial_state
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to enhance state with solar radiation at line {}: {}".format(line_num, e))
-            return initial_state
-
-    def _enhance_state_with_elevation_only(self, initial_state: str, current_elevation: float, is_rising: bool) -> str:
-        """Enhance state calculation with elevation data only."""
-        try:
-            elevation_threshold = DEFAULT_ELEVATION_THRESHOLD
-
-            if initial_state == "day":
-                if not is_rising and current_elevation < elevation_threshold:
-                    return "evening"
-
-            elif initial_state == "evening":
-                if is_rising and current_elevation > elevation_threshold:
-                    return "day"
-
-            return initial_state
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to enhance state with elevation only at line {}: {}".format(line_num, e))
-            return initial_state
-
-    def start_morning(self, _kwargs: Optional[Dict[str, Any]]) -> None:
-        """Start the morning scene with validation."""
-        try:
-            try:
-                sun_state = self.sun_up()
-
-                if sun_state is None:
-                    return
-
-                should_skip = sun_state or self.current_state == "day"
-                if should_skip:
-                    self.log("Morning scene skipped: sun_state={}, current_state={}, activating day scene".format(
-                        sun_state, self.current_state))
-                    self._start_scene("day")
-                    return
-            except Exception as e:
-                line_num = traceback.extract_stack()[-1].lineno
-                self.log("ERROR: Failed to check sun state at line {}: {}".format(line_num, e))
-
+    def _start_morning(self, kwargs):
+        """Start morning scene."""
+        if self.sun_up() or self.current_state == "day":
+            self._start_day()
+        else:
             self._start_scene("morning")
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to start morning scene at line {}: {}".format(line_num, e))
+    def _start_day(self, kwargs=None):
+        """Start day scene."""
+        self._start_scene("day")
 
-    def start_day(self, _kwargs: Optional[Dict[str, Any]]) -> None:
-        """Start the day scene."""
-        try:
-            self._start_scene("day")
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to start day scene at line {}: {}".format(line_num, e))
-
-    def start_evening(self, _kwargs: Optional[Dict[str, Any]]) -> None:
-        """Start the evening scene with validation."""
-        try:
-            should_skip = self.current_state == "night"
-            if should_skip:
-                self.log("Evening scene skipped: current_state={}".format(self.current_state))
-                return
-
+    def _start_evening(self, kwargs=None):
+        """Start evening scene."""
+        if self.current_state != "night":
             self._start_scene("evening")
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to start evening scene at line {}: {}".format(line_num, e))
 
-    def start_night(self, _kwargs: Optional[Dict[str, Any]]) -> None:
-        """Start the night scene."""
-        try:
-            self._start_scene("night")
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to start night scene at line {}: {}".format(line_num, e))
+    def _start_night(self, kwargs):
+        """Start night scene."""
+        self._start_scene("night")
 
-    def activate_scene(self, scene_name: str, run_now: bool = False) -> None:
-        """Activate a specific scene by controlling group entities."""
-        try:
-            if scene_name not in self.scenes:
-                available_scenes = list(self.scenes.keys())
-                self.log("ERROR: Scene '{}' not found in configuration. Available scenes: {}".format(
-                    scene_name, available_scenes))
-                return
+    def _start_scene(self, scene_name):
+        """Start a scene."""
+        self.log("[E001] Starting scene '{}'".format(scene_name))
 
-            if self.current_state != scene_name:
-                self.current_state = scene_name
-                self.set_state(TIME_STATE_ENTITY, state=scene_name)
+        self.current_state = scene_name
+        self.set_state(TIME_STATE_ENTITY, state=scene_name)
+        self._activate_scene(scene_name)
 
-            self._refresh_group_cache_if_needed()
+    def _activate_scene(self, scene_name, run_now=False):
+        """Activate scene by controlling group entities."""
+        self.log("[F001] Activating scene '{}' (run_now={})".format(scene_name, run_now))
 
-            scene_config = self.scenes.get(scene_name, {})
-            if not scene_config:
-                self.log("WARNING: Scene '{}' has no configuration".format(scene_name))
-                return
+        if scene_name not in self.scenes:
+            self.log("[F002] Scene '{}' not found in configuration".format(scene_name))
+            return
 
-            self._process_scene_configuration(scene_name, scene_config, run_now)
+        scene_config = self.scenes[scene_name]
+        all_entities = []
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to activate scene '{}' at line {}: {}".format(scene_name, line_num, e))
-
-    def _refresh_group_cache_if_needed(self) -> None:
-        """Refresh the group cache if it's empty or expired."""
-        try:
-            if not self.groups or not self.groups_cache_time:
-                self.get_groups()
+        # Collect all entities to control using group-area lookup
+        for group_name, group_state in scene_config.items():
+            group_entity_id = f"group.{group_name}"
+            if group_entity_id in self.group_area_entities:
+                # Use group-area lookup for efficient entity collection
+                group_area_entities = self.group_area_entities[group_entity_id]
+                for area, entities in group_area_entities.items():
+                    for entity in entities:
+                        all_entities.append({"entity": entity, "state": group_state, "area": area, "group": group_name})
             else:
-                now = datetime.now()
-                cache_age = (now - self.groups_cache_time).total_seconds()
-                if cache_age > CACHE_EXPIRY_HOURS * 3600:
-                    self.get_groups()
+                # Fallback to old method if group not in lookup
+                entities = self.groups.get(group_entity_id, [])
+                for entity in entities:
+                    all_entities.append({"entity": entity, "state": group_state, "area": self.entity_to_area.get(entity, "unknown"), "group": group_name})
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to refresh group cache at line {}: {}".format(line_num, e))
+        self.log("[F003] Scene '{}': {} entities to control".format(scene_name, len(all_entities)))
 
-    def _process_scene_configuration(self, scene_name: str, scene_config: Dict[str, bool], run_now: bool) -> None:
-        """Process scene configuration and control individual entities."""
-        try:
-            for group_name, group_state in scene_config.items():
-                try:
-                    if not isinstance(group_state, bool):
-                        self.log("ERROR: Invalid group_state for group '{}' in scene '{}': {} (must be boolean)".format(
-                            group_name, scene_name, group_state))
-                        continue
+        if run_now:
+            # Immediate execution
+            self.log("[F004] Executing immediate control for {} entities".format(len(all_entities)))
+            for entity_info in all_entities:
+                self._turn_onoff(entity_info["entity"], entity_info["state"])
+        else:
+            # Staggered execution with random area selection
+            self.log("[F005] Starting staggered control for {} entities".format(len(all_entities)))
+            self._execute_staggered_control(all_entities)
 
-                    group_entity_id = "{}{}".format(GROUP_PREFIX, group_name)
-                    entities = self.groups.get(group_entity_id)
+    def _execute_staggered_control(self, entities_to_control):
+        """Execute light control with random area-based staggering."""
+        self.log("[G001] Starting staggered control execution")
 
-                    if entities is None:
-                        self.log("ERROR: No entities found for group '{}' in scene '{}'".format(group_name, scene_name))
-                        continue
+        if not entities_to_control:
+            self.log("[G002] No entities to control, exiting")
+            return
 
-                    if run_now:
-                        for entity in entities:
-                            try:
-                                self._turn_onoff({"entity": entity, "state": group_state})
-                            except Exception as e:
-                                line_num = traceback.extract_stack()[-1].lineno
-                                self.log("ERROR: Failed to control entity '{}' at line {}: {}".format(entity, line_num, e))
-                    else:
-                        for i, entity in enumerate(entities):
-                            try:
-                                delay = (i * 0.1) % (RANDOM_DELAY_SECONDS / 10)
-                                self.run_in(self._turn_onoff, delay, entity=entity, state=group_state)
-                            except Exception as e:
-                                line_num = traceback.extract_stack()[-1].lineno
-                                self.log("ERROR: Failed to schedule entity '{}' at line {}: {}".format(entity, line_num, e))
+        # Group entities by area using the area information already in entity_info
+        area_groups = {}
+        for entity_info in entities_to_control:
+            area = entity_info.get("area", "unknown")
+            area_groups.setdefault(area, []).append(entity_info)
 
-                except Exception as e:
-                    line_num = traceback.extract_stack()[-1].lineno
-                    self.log("ERROR: Failed to process group '{}' at line {}: {}".format(group_name, line_num, e))
-                    continue
+        self.log("[G003] Grouped entities by area: {}".format({area: len(entities) for area, entities in area_groups.items()}))
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to process scene configuration at line {}: {}".format(line_num, e))
+        if not area_groups:
+            self.log("[G004] No area groups found, exiting")
+            return
 
-    def _turn_onoff(self, kwargs: Dict[str, Any]) -> None:
-        """Turn an entity on or off based on the specified state."""
-        try:
-            entity = kwargs.get("entity")
-            state = kwargs.get("state")
+        # Create a list of areas with entities to control
+        areas_with_entities = [area for area, entities in area_groups.items() if entities]
 
-            if entity is None or state is None:
-                self.log("ERROR: Missing required parameters in _turn_onoff: entity={}, state={}".format(entity, state))
-                return
+        if not areas_with_entities:
+            self.log("[G005] No areas with entities to control, exiting")
+            return
 
-            if not isinstance(state, bool):
-                self.log("ERROR: Invalid state type in _turn_onoff: entity={}, state={} (must be boolean)".format(
-                    entity, state))
-                return
+        self.log("[G006] Areas with entities: {}".format(areas_with_entities))
 
-            for attempt in range(MAX_RETRIES):
-                try:
-                    if state:
-                        self.turn_on(entity)
-                    else:
-                        self.turn_off(entity)
-                    break
+        # Randomize the order of areas
+        random.shuffle(areas_with_entities)
+        self.log("[G007] Randomized area order: {}".format(areas_with_entities))
 
-                except Exception as e:
-                    if attempt < MAX_RETRIES - 1:
-                        self.log("WARNING: Failed to control entity '{}' (attempt {}/{}), retrying...".format(
-                            entity, attempt + 1, MAX_RETRIES))
-                        time.sleep(RETRY_DELAY)
-                    else:
-                        raise
+        current_delay = 0
 
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to control entity '{}' after retries at line {}: {}".format(entity, line_num, e))
+        for area in areas_with_entities:
+            area_entities = area_groups[area]
+            if not area_entities:
+                continue
 
-    def _get_safe_state(self, entity: str, attribute: Optional[str] = None, log_name: Optional[str] = None) -> Optional[Union[str, Dict[str, Any]]]:
-        """Safely get state from Home Assistant entity with comprehensive error handling."""
-        try:
-            cache_key = f"{entity}:{attribute or 'state'}"
-            current_time = time.time()
+            self.log("[G008] Processing area '{}' with {} entities".format(area, len(area_entities)))
 
-            if cache_key in self.sensor_cache:
-                cache_age = current_time - self.sensor_cache_time.get(cache_key, 0)
-                if cache_age < self.sensor_cache_duration:
-                    return self.sensor_cache[cache_key]
+            # Process each entity in the area with random delays
+            for i, entity_info in enumerate(area_entities):
+                entity_delay = current_delay
+                if i > 0:  # Add light delay for subsequent lights
+                    light_delay = random.uniform(self.light_delay_min, self.light_delay_max)
+                    entity_delay += light_delay
+                    self.log("[G010] Entity {} (state={}, group={}) scheduled in {:.1f}s (added {:.1f}s delay)".format(
+                        entity_info["entity"], entity_info["state"], entity_info["group"], entity_delay, light_delay))
+                else:
+                    self.log("[G011] Entity {} (state={}, group={}) scheduled in {:.1f}s (first entity in area)".format(
+                        entity_info["entity"], entity_info["state"], entity_info["group"], entity_delay))
 
-            state = self.get_state(entity, attribute=attribute)
+                self.run_in(
+                    self._turn_onoff,
+                    entity_delay,
+                    entity=entity_info["entity"],
+                    state=entity_info["state"]
+                )
 
-            if state is None or state == "unavailable":
-                return None
+            # Add area delay for next area
+            if len(areas_with_entities) > 1:
+                area_delay = random.uniform(self.room_delay_min, self.room_delay_max)
+                current_delay += area_delay
+                self.log("[G012] Added {:.1f}s delay before next area (total delay now: {:.1f}s)".format(
+                    area_delay, current_delay))
 
-            self.sensor_cache[cache_key] = state
-            self.sensor_cache_time[cache_key] = current_time
+        self.log("[G013] Staggered control execution complete")
 
-            return state
+    def _turn_onoff(self, kwargs):
+        """Turn entity on or off."""
+        entity = kwargs.get("entity")
+        state = kwargs.get("state")
 
-        except Exception as e:
-            log_msg = log_name or entity
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to get state for '{}' at line {}: {}".format(log_msg, line_num, e))
-            return None
-
-    def _start_scene(self, scene_name: str) -> None:
-        """Start a scene by updating state and activating it."""
-        try:
-            self.current_state = scene_name
-            self.set_state(TIME_STATE_ENTITY, state=scene_name)
-            self.activate_scene(scene_name)
-
-        except Exception as e:
-            line_num = traceback.extract_stack()[-1].lineno
-            self.log("ERROR: Failed to start scene '{}' at line {}: {}".format(scene_name, line_num, e))
-            raise ValueError(f"Scene activation failed for '{scene_name}'") from e
+        if entity and state is not None:
+            try:
+                if state:
+                    self.turn_on(entity)
+                    self.log("[H001] Turned ON entity: {}".format(entity))
+                else:
+                    self.turn_off(entity)
+                    self.log("[H002] Turned OFF entity: {}".format(entity))
+            except Exception as e:
+                self.log("[H003] Failed to control entity {}: {}".format(entity, e), level="ERROR")
+        else:
+            self.log("[H004] Invalid entity or state: entity={}, state={}".format(entity, state))
 
