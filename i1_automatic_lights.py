@@ -32,8 +32,8 @@ class AutomaticLights(hass.Hass):
         self.current_state = "night"
         self.groups = {}
         self.last_state_change = 0
-        self.areas = []
-        self.area_entities = {}
+        self.area_list = []
+        self.area_entity_map = {}
         self.entity_to_area = {}  # Cache for O(1) entity lookup
         self.group_area_entities = {}  # group_id -> {area: [entities]}
 
@@ -119,8 +119,8 @@ class AutomaticLights(hass.Hass):
 
         # Get areas and their entities
         self.log("[B005] Fetching areas from Home Assistant")
-        self.areas = self.areas()
-        self.log("[B006] Found {} areas: {}".format(len(self.areas), self.areas))
+        self.area_list = self.areas()
+        self.log("[B006] Found {} areas: {}".format(len(self.area_list), self.area_list))
 
         # Initialize group-area-entities lookup
         for scene_config in self.scenes.values():
@@ -129,13 +129,13 @@ class AutomaticLights(hass.Hass):
                 if group_entity_id in self.groups:
                     self.group_area_entities[group_entity_id] = {}
 
-        for area in self.areas:
+        for area in self.area_list:
             # Get entities from the area and filter them to only include entities in configured groups
             all_area_entities = self.area_entities(area)
             if all_area_entities:
                 # Filter to only include configured entities
                 filtered_area_entities = [entity for entity in all_area_entities if entity in configured_entities]
-                self.area_entities[area] = filtered_area_entities
+                self.area_entity_map[area] = filtered_area_entities
 
                 # Cache entity-to-area mapping for filtered entities
                 for entity in filtered_area_entities:
@@ -161,7 +161,7 @@ class AutomaticLights(hass.Hass):
                 group_entity_id, total_entities, len(area_entities)))
 
         self.log("[B009] Areas setup complete: {} areas with entities, {} entities cached".format(
-            len(self.area_entities), len(self.entity_to_area)))
+            len(self.area_entity_map), len(self.entity_to_area)))
 
         # Log detailed group-area-entity mapping
         self._log_group_area_entity_mapping()
