@@ -163,6 +163,40 @@ class AutomaticLights(hass.Hass):
         self.log("[B009] Areas setup complete: {} areas with entities, {} entities cached".format(
             len(self.area_entities), len(self.entity_to_area)))
 
+        # Log detailed group-area-entity mapping
+        self._log_group_area_entity_mapping()
+
+    def _log_group_area_entity_mapping(self):
+        """Log all entities in groups from config, grouped by area."""
+        self.log("[B011] === GROUP-AREA-ENTITY MAPPING ===")
+
+        # Get all groups that are actually used in the scenes configuration
+        configured_groups = set()
+        for scene_config in self.scenes.values():
+            for group_name in scene_config.keys():
+                group_entity_id = f"group.{group_name}"
+                configured_groups.add(group_entity_id)
+
+        for group_entity_id in sorted(configured_groups):
+            if group_entity_id in self.group_area_entities:
+                group_name = group_entity_id.replace("group.", "")
+                self.log("[B012] {}:".format(group_name))
+
+                area_entities = self.group_area_entities[group_entity_id]
+                if area_entities:
+                    for area in sorted(area_entities.keys()):
+                        entities = area_entities[area]
+                        self.log("[B013]   {}:".format(area))
+                        for entity in sorted(entities):
+                            self.log("[B014]     - {}".format(entity))
+                else:
+                    self.log("[B015]   No entities found in any area")
+            else:
+                group_name = group_entity_id.replace("group.", "")
+                self.log("[B016] {}: Group not found or has no entities".format(group_name))
+
+        self.log("[B017] === END GROUP-AREA-ENTITY MAPPING ===")
+
     def _get_entities_by_area(self, target_entities: List[str]) -> Dict[str, List[str]]:
         """Group target entities by their area using O(1) lookup."""
         self.log("[C001] Grouping {} entities by area".format(len(target_entities)))
