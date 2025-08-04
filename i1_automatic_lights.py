@@ -382,7 +382,7 @@ class AutomaticLights(hass.Hass):
             # Immediate execution
             self.log("[F004] Executing immediate control for {} entities".format(len(all_entities)))
             for entity_info in all_entities:
-                self._turn_onoff(entity_info["entity"], entity_info["state"])
+                self._turn_onoff({"entity": entity_info["entity"], "state": entity_info["state"]})
         else:
             # Staggered execution with random area selection
             self.log("[F005] Starting staggered control for {} entities".format(len(all_entities)))
