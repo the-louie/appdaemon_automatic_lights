@@ -184,9 +184,10 @@ class AutomaticLights(hass.Hass):
 
                 area_entities = self.group_area_entities[group_entity_id]
                 if area_entities:
-                    for area in sorted(area_entities.keys()):
-                        entities = area_entities[area]
-                        self.log("[B013]   {}:".format(area))
+                    for area_id in sorted(area_entities.keys()):
+                        entities = area_entities[area_id]
+                        area_name = self.area_name(area_id)
+                        self.log("[B013]   {}:".format(area_name))
                         for entity in sorted(entities):
                             self.log("[B014]     - {}".format(entity))
                 else:
