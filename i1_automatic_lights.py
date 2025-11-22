@@ -83,8 +83,12 @@ class AutomaticLights(hass.Hass):
         self.listen_event(self._handle_manual_scene, event='call_service', domain='scene')
 
         # Schedule daily events
+        # According to AppDaemon docs, run_daily accepts both "HH:MM:SS" and "HH:MM" formats
+        # random_start and random_end must satisfy: random_start < random_end
+        # Both can be negative (before event) or positive (after event)
         self.run_daily(self._start_morning, self.morning_start, random_start=-45*60, random_end=-30*60)
-        self.run_daily(self._start_night, self.night_start, random_start=-15*60, random_end=10*60)
+        self.log("[A004] Scheduled night start at {} with random window -15 to -10 minutes".format(self.night_start))
+        self.run_daily(self._start_night, self.night_start, random_start=-15*60, random_end=-10*60)
 
         # Activate initial scene
         if self.current_state in self.scenes:
