@@ -14,6 +14,8 @@ import appdaemon.plugins.hass.hassapi as hass
 # Configuration defaults
 DEFAULT_ELEVATION_THRESHOLD = 3.0
 DEFAULT_MORNING_START = "05:30"
+DEFAULT_LATE_MORNING_START = None
+DEFAULT_EARLY_NIGHT_START = None
 DEFAULT_NIGHT_START = "23:30"
 DEFAULT_LIGHT_DELAY_MIN = 2
 DEFAULT_LIGHT_DELAY_MAX = 5
@@ -21,9 +23,11 @@ DEFAULT_ROOM_DELAY_MIN = 30
 DEFAULT_ROOM_DELAY_MAX = 120
 
 # Entity constants
-SUN_ELEVATION_SENSOR = "sensor.sun_solar_elevation"
-SUN_RISING_SENSOR = "sensor.sun_solar_rising"
+SUN_ENTITY = "sun.sun"
 TIME_STATE_ENTITY = "irisone.time_state"
+
+# State machine order for cumulative scene merging on init
+STATE_ORDER = ("night", "morning", "late_morning", "day", "evening", "early_night")
 
 # Throttle / logging
 SUN_HANDLER_THROTTLE_SECONDS = 60
@@ -82,8 +86,11 @@ class AutomaticLights(hass.Hass):
         self.solar: SolarConfig = SolarConfig()
         self.stagger: StaggerConfig = StaggerConfig()
         self.morning_start: str = DEFAULT_MORNING_START
+        self.late_morning_start: str | None = DEFAULT_LATE_MORNING_START
+        self.early_night_start: str | None = DEFAULT_EARLY_NIGHT_START
         self.night_start: str = DEFAULT_NIGHT_START
         self.scenes: dict = {}
+        self._pending_timers: list = []
 
     def initialize(self):
         """Initialize the app."""
@@ -96,17 +103,41 @@ class AutomaticLights(hass.Hass):
         self._register_listeners()
         self._schedule_daily_events()
 
-        if self.current_state in self.scenes:
-            self._activate_scene(self.current_state, immediate=True)
+        self._activate_cumulative_state(self.current_state)
 
         self.log("[A003] Initialization complete: state={}".format(self.current_state))
 
     # ── Configuration ──────────────────────────────────────────────
 
+    def _parse_time_config(self, key: str, default: str | None) -> str | None:
+        """Read and validate a time configuration value."""
+        raw = self.args.get(key, default)
+        if raw is None:
+            return None
+        try:
+            self.parse_time(raw)
+            return raw
+        except (ValueError, TypeError):
+            self.log(
+                "[A011] WARNING: Invalid time '{}' for '{}', "
+                "using default '{}'".format(raw, key, default)
+            )
+            return default
+
     def _load_config(self):
         """Load and validate all configuration from apps.yaml."""
-        self.morning_start = self.args.get("morning_start", DEFAULT_MORNING_START)
-        self.night_start = self.args.get("night_start", DEFAULT_NIGHT_START)
+        self.morning_start = self._parse_time_config(
+            "morning_start", DEFAULT_MORNING_START
+        )
+        self.late_morning_start = self._parse_time_config(
+            "late_morning_start", DEFAULT_LATE_MORNING_START
+        )
+        self.early_night_start = self._parse_time_config(
+            "early_night_start", DEFAULT_EARLY_NIGHT_START
+        )
+        self.night_start = self._parse_time_config(
+            "night_start", DEFAULT_NIGHT_START
+        )
         self.scenes = self.args.get("scenes", {})
 
         # Solar radiation
@@ -128,10 +159,21 @@ class AutomaticLights(hass.Hass):
                 sensor = None
                 threshold = None
 
+        try:
+            elev_thresh = float(elevation_threshold)
+        except (ValueError, TypeError):
+            self.log(
+                "[A012] WARNING: Invalid elevation_threshold '{}', "
+                "using default {}".format(
+                    elevation_threshold, DEFAULT_ELEVATION_THRESHOLD
+                )
+            )
+            elev_thresh = DEFAULT_ELEVATION_THRESHOLD
+
         self.solar = SolarConfig(
             sensor=sensor,
             threshold=threshold,
-            elevation_threshold=float(elevation_threshold),
+            elevation_threshold=elev_thresh,
         )
 
         # Staggering
@@ -144,9 +186,12 @@ class AutomaticLights(hass.Hass):
         )
 
         self.log(
-            "[A002] Configuration loaded: morning={}, night={}, solar={}, "
+            "[A002] Configuration loaded: morning={}, late_morning={}, "
+            "early_night={}, night={}, solar={}, "
             "stagger=light {}-{}s, area {}-{}s".format(
                 self.morning_start,
+                self.late_morning_start or "disabled",
+                self.early_night_start or "disabled",
                 self.night_start,
                 "enabled" if self.solar.is_enabled else "disabled",
                 self.stagger.light_delay_min,
@@ -158,7 +203,27 @@ class AutomaticLights(hass.Hass):
 
     def _register_listeners(self):
         """Register state and event listeners."""
-        self.listen_state(self._handle_sun_pos, SUN_ELEVATION_SENSOR)
+        # Validate sun entity is available before registering
+        elevation = self.get_state(SUN_ENTITY, attribute="elevation")
+        rising = self.get_state(SUN_ENTITY, attribute="rising")
+        if elevation is not None and str(elevation) not in HA_UNAVAILABLE_STATES:
+            self.log(
+                "[A007] Sun entity '{}' elevation={}, rising={}".format(
+                    SUN_ENTITY, elevation, rising
+                )
+            )
+        else:
+            self.log(
+                "[A008] WARNING: Sun entity '{}' unavailable (elevation='{}') "
+                "— day/evening auto-transitions will not work".format(
+                    SUN_ENTITY, elevation
+                ),
+                level="WARNING",
+            )
+
+        self.listen_state(
+            self._handle_sun_pos, SUN_ENTITY, attribute="elevation"
+        )
         self.listen_event(
             self._handle_manual_scene, event="call_service", domain="scene"
         )
@@ -176,6 +241,30 @@ class AutomaticLights(hass.Hass):
                 self.morning_start
             )
         )
+
+        if self.late_morning_start:
+            self.run_daily(
+                self._on_late_morning_schedule,
+                self.late_morning_start,
+            )
+            self.log(
+                "[A009] Scheduled late_morning at {}".format(
+                    self.late_morning_start
+                )
+            )
+
+        if self.early_night_start:
+            self.run_daily(
+                self._on_early_night_schedule,
+                self.early_night_start,
+                random_start=-15 * 60,
+                random_end=-10 * 60,
+            )
+            self.log(
+                "[A010] Scheduled early_night at {} (random window -15 to -10 min)".format(
+                    self.early_night_start
+                )
+            )
 
         self.run_daily(
             self._on_night_schedule,
@@ -245,6 +334,13 @@ class AutomaticLights(hass.Hass):
                 if group_entity_id in self.groups:
                     self.group_area_entities.setdefault(group_entity_id, {})
 
+        # Precompute group entity sets for O(1) membership tests
+        group_sets: dict[str, set[str]] = {
+            gid: set(entities)
+            for gid, entities in self.groups.items()
+            if gid in self.group_area_entities
+        }
+
         for area in self.area_list:
             all_area_entities = self.area_entities(area)
             if not all_area_entities:
@@ -257,11 +353,10 @@ class AutomaticLights(hass.Hass):
             for entity in filtered:
                 self.entity_to_area[entity] = area
 
-            for group_id, group_entities in self.groups.items():
-                if group_id in self.group_area_entities:
-                    in_area = [e for e in filtered if e in group_entities]
-                    if in_area:
-                        self.group_area_entities[group_id][area] = in_area
+            for group_id, group_set in group_sets.items():
+                in_area = [e for e in filtered if e in group_set]
+                if in_area:
+                    self.group_area_entities[group_id][area] = in_area
 
             self.log(
                 "[B007] Area '{}': {} configured of {} total entities".format(
@@ -322,6 +417,10 @@ class AutomaticLights(hass.Hass):
         """Handle manual scene activation via HA service call."""
         self.log("[D001] Manual scene activation triggered")
 
+        if not isinstance(data, dict):
+            self.log("[D006] Invalid event data: {}".format(type(data).__name__))
+            return
+
         service_data = data.get("service_data", {})
         scene_entity = service_data.get("entity_id")
 
@@ -367,8 +466,8 @@ class AutomaticLights(hass.Hass):
     # ── Sensor helpers ─────────────────────────────────────────────
 
     def _get_sun_elevation(self) -> float | None:
-        """Read current sun elevation, returning None on failure."""
-        raw = self.get_state(SUN_ELEVATION_SENSOR)
+        """Read current sun elevation from sun.sun attribute, returning None on failure."""
+        raw = self.get_state(SUN_ENTITY, attribute="elevation")
         if raw is None or str(raw) in HA_UNAVAILABLE_STATES:
             self.log("[S005] Sun elevation unavailable: '{}'".format(raw))
             return None
@@ -379,18 +478,20 @@ class AutomaticLights(hass.Hass):
             return None
 
     def _get_sun_rising(self) -> bool | None:
-        """Read whether sun is currently rising, returning None on failure."""
-        raw = self.get_state(SUN_RISING_SENSOR)
+        """Read whether sun is currently rising from sun.sun attribute, returning None on failure."""
+        raw = self.get_state(SUN_ENTITY, attribute="rising")
         if raw is None or str(raw) in HA_UNAVAILABLE_STATES:
             self.log("[S007] Sun rising sensor unavailable: '{}'".format(raw))
             return None
+        if isinstance(raw, bool):
+            return raw
         if isinstance(raw, str):
             return raw.lower() in ("true", "1", "yes", "on")
         return bool(raw)
 
     def _get_solar_radiation(self) -> float | None:
         """Read solar radiation sensor, returning None on failure."""
-        raw = self.get_state(self.solar.sensor, attribute="state")
+        raw = self.get_state(self.solar.sensor)
         if raw is None or str(raw) in HA_UNAVAILABLE_STATES:
             self.log(
                 "[S001] Solar sensor '{}' unavailable: '{}'".format(
@@ -420,7 +521,7 @@ class AutomaticLights(hass.Hass):
         light_threshold = self.solar.threshold
 
         if (
-            self.current_state == "morning"
+            self.current_state in ("morning", "late_morning")
             and is_rising
             and elevation > elev_threshold
             and light_level > light_threshold
@@ -440,7 +541,7 @@ class AutomaticLights(hass.Hass):
         elev_threshold = self.solar.elevation_threshold
 
         if (
-            self.current_state == "morning"
+            self.current_state in ("morning", "late_morning")
             and is_rising
             and elevation > elev_threshold
         ):
@@ -479,23 +580,53 @@ class AutomaticLights(hass.Hass):
             )
 
     def _calculate_state(self) -> str:
-        """Calculate initial state based on current time and sun position."""
+        """Calculate initial state based on current time and sun position.
+
+        State order: night → morning → late_morning → day → evening → early_night → night
+        """
         now = self.time()
         sunrise = self.sunrise().time()
         sunset = self.sunset().time()
         morning_start = self.parse_time(self.morning_start)
         night_start = self.parse_time(self.night_start)
+        late_morning_start = (
+            self.parse_time(self.late_morning_start)
+            if self.late_morning_start
+            else None
+        )
+        early_night_start = (
+            self.parse_time(self.early_night_start)
+            if self.early_night_start
+            else None
+        )
 
-        if now <= sunrise and now <= morning_start:
+        if now <= morning_start:
+            # Check if night_start is past midnight and we haven't reached it yet
+            if night_start < morning_start and now < night_start:
+                if early_night_start:
+                    # If early_night_start is before midnight (> night_start in time
+                    # ordering), it already passed yesterday, so state is early_night.
+                    # If early_night_start is also past midnight, compare directly.
+                    if early_night_start > night_start or now >= early_night_start:
+                        return "early_night"
+                return "evening"
             return "night"
-        if now > morning_start and now < sunrise:
+        if now < sunrise:
+            # After morning_start but before sunrise: morning or late_morning
+            if late_morning_start and now >= late_morning_start:
+                return "late_morning"
             return "morning"
+        # When morning_start >= sunrise (summer), morning/late_morning states are
+        # skipped in _calculate_state because the sun is already up. The scheduled
+        # callbacks handle the morning scene activation at runtime.
         if now >= sunrise and now < sunset:
             return "day"
         if now >= sunset:
             # Handle night_start at or past midnight (e.g., 00:00):
-            # when night_start <= sunset, evening runs from sunset until midnight
+            # when night_start <= sunset, evening/early_night runs from sunset until midnight
             if night_start <= sunset or now < night_start:
+                if early_night_start and now >= early_night_start:
+                    return "early_night"
                 return "evening"
             return "night"
         return "night"
@@ -504,10 +635,21 @@ class AutomaticLights(hass.Hass):
 
     def _on_morning_schedule(self, **kwargs):
         """Scheduled morning callback."""
-        if self.sun_up() or self.current_state == "day":
-            self._start_scene("day")
-        else:
-            self._start_scene("morning")
+        if self.current_state == "day":
+            return  # Already in day, no need to regress
+        self._start_scene("morning")
+
+    def _on_late_morning_schedule(self, **kwargs):
+        """Scheduled late morning callback."""
+        if self.current_state not in ("morning", "night"):
+            return  # State has already advanced past late_morning
+        self._start_scene("late_morning")
+
+    def _on_early_night_schedule(self, **kwargs):
+        """Scheduled early night callback."""
+        if self.current_state != "evening":
+            return  # Only transition to early_night from evening
+        self._start_scene("early_night")
 
     def _on_night_schedule(self, **kwargs):
         """Scheduled night callback."""
@@ -521,15 +663,104 @@ class AutomaticLights(hass.Hass):
             immediate: If True, control entities immediately (no stagger).
                        Used for manual triggers and initialization.
         """
-        if scene_name == "evening" and self.current_state == "night":
-            self.log("[E002] Blocked evening transition: already in night")
+        if scene_name == "evening" and self.current_state in ("early_night", "night"):
+            self.log(
+                "[E002] Blocked evening transition: already in {}".format(
+                    self.current_state
+                )
+            )
             return
+
+        if scene_name == self.current_state and not immediate:
+            self.log(
+                "[E003] Skipped transition: already in '{}'".format(scene_name)
+            )
+            return
+
+        # Cancel any pending staggered timers from the previous scene
+        for handle in self._pending_timers:
+            self.cancel_timer(handle)
+        self._pending_timers.clear()
 
         self.log("[E001] Transitioning to scene '{}'".format(scene_name))
         self.current_state = scene_name
         self.set_state(TIME_STATE_ENTITY, state=scene_name)
         self._no_transition_log_counter = 0
         self._activate_scene(scene_name, immediate=immediate)
+
+    def _activate_cumulative_state(self, target_state: str):
+        """Replay all scenes from night through target_state to build cumulative state.
+
+        Scenes are deltas: each only defines the groups it changes. On init, we
+        must merge all predecessor scenes to reconstruct the full lighting state.
+        For example, early_night only sets bedroom=off, but general/night lighting
+        should be on (set by the evening scene earlier in the chain).
+        """
+        if target_state not in STATE_ORDER:
+            self.log(
+                "[F006] State '{}' not in state order, "
+                "activating directly".format(target_state)
+            )
+            if target_state in self.scenes:
+                self._activate_scene(target_state, immediate=True)
+            return
+
+        target_idx = STATE_ORDER.index(target_state)
+        # Walk night -> ... -> target_state, merging group states
+        merged: dict[str, bool] = {}
+        chain = []
+        for i in range(target_idx + 1):
+            state_name = STATE_ORDER[i]
+            if state_name in self.scenes:
+                for group_name, target in self.scenes[state_name].items():
+                    merged[group_name] = target
+                chain.append(state_name)
+
+        self.log(
+            "[F007] Cumulative init for '{}': replayed {} scenes ({}), "
+            "{} groups to control".format(
+                target_state, len(chain), " -> ".join(chain), len(merged)
+            )
+        )
+
+        # Build EntityControl list from the merged state
+        entities: list[EntityControl] = []
+        for group_name, target in merged.items():
+            group_id = "group.{}".format(group_name)
+
+            if group_id in self.group_area_entities:
+                for area, area_entities in self.group_area_entities[group_id].items():
+                    for entity_id in area_entities:
+                        entities.append(
+                            EntityControl(
+                                entity_id=entity_id,
+                                target_state=target,
+                                area=area,
+                                group=group_name,
+                            )
+                        )
+            else:
+                for entity_id in self.groups.get(group_id, []):
+                    entities.append(
+                        EntityControl(
+                            entity_id=entity_id,
+                            target_state=target,
+                            area=self.entity_to_area.get(entity_id, "unknown"),
+                            group=group_name,
+                        )
+                    )
+
+        if not entities:
+            self.log("[F008] No entities to control after cumulative merge")
+            return
+
+        self.log(
+            "[F009] Immediate control for {} entities (cumulative)".format(
+                len(entities)
+            )
+        )
+        for ec in entities:
+            self._turn_onoff(entity=ec.entity_id, state=ec.target_state)
 
     def _activate_scene(self, scene_name: str, *, immediate: bool = False):
         """Activate a scene by controlling its group entities."""
@@ -622,8 +853,8 @@ class AutomaticLights(hass.Hass):
                 "[G008] Area '{}': {} entities".format(area, len(area_entities))
             )
 
+            entity_delay = current_delay
             for i, ec in enumerate(area_entities):
-                entity_delay = current_delay
                 if i > 0:
                     entity_delay += random.uniform(
                         self.stagger.light_delay_min,
@@ -636,12 +867,13 @@ class AutomaticLights(hass.Hass):
                     )
                 )
 
-                self.run_in(
+                handle = self.run_in(
                     self._turn_onoff,
                     entity_delay,
                     entity=ec.entity_id,
                     state=ec.target_state,
                 )
+                self._pending_timers.append(handle)
 
             if len(areas) > 1:
                 current_delay += random.uniform(
@@ -670,6 +902,8 @@ class AutomaticLights(hass.Hass):
                 self.turn_off(entity)
                 self.log("[H002] Turned OFF: {}".format(entity))
         except Exception as exc:
+            if isinstance(exc, (TypeError, AttributeError, NameError)):
+                raise  # Programming error, do not swallow
             self.log(
                 "[H003] Failed to control {}: {} ({})".format(
                     entity, exc, type(exc).__name__

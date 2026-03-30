@@ -7,6 +7,8 @@ automatic_lights:
 
   # Time-based configuration
   morning_start: "05:30"
+  late_morning_start: "06:40"   # Optional: bedroom lights etc.
+  early_night_start: "21:30"    # Optional: dim before full night
   night_start: "23:30"
 
   # Optional solar radiation configuration
@@ -23,26 +25,29 @@ automatic_lights:
     room_delay_max: 120   # seconds between different areas
 
   # Scene configurations
+  # State order: night → morning → late_morning → day → evening → early_night → night
+  # Scenes are cumulative: each scene only defines the groups it changes.
+  # Groups not listed in a scene retain their state from earlier transitions.
+  # On init/restart, the app replays all predecessor scenes up to the current
+  # state to reconstruct the correct cumulative lighting state.
   scenes:
     night:
-      group.living_room: false
+      group.specific_lighting: false
+      group.general_lighting: false
+      group.night_lighting: true
       group.bedroom: false
-      group.kitchen: true
-      group.hallway: true
     morning:
-      group.living_room: true
+      group.general_lighting: true
+      group.night_lighting: true
+    late_morning:
       group.bedroom: true
-      group.kitchen: true
-      group.hallway: true
     day:
-      group.living_room: false
+      group.general_lighting: false
+      group.night_lighting: false
       group.bedroom: false
-      group.kitchen: false
-      group.hallway: false
     evening:
-      group.living_room: true
+      group.general_lighting: true
+      group.night_lighting: true
+      group.bedroom: true
+    early_night:
       group.bedroom: false
-      group.kitchen: true
-      group.hallway: true
-
-
