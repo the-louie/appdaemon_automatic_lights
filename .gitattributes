@@ -1,0 +1,21 @@
+# Line endings are normalised to LF in the repository.
+#
+# Added 2026-08-31, after commit 6446235 ("catchup") rewrote every line of
+# i1_wakeup_music.py as CRLF. The content was byte-identical -- verified by
+# comparing both blobs with \r stripped -- but the diff read as 1445
+# insertions and 1445 deletions. That makes review impossible, and would
+# have concealed a real change had one been mixed in. Backlog tickets
+# T-20..T-29 cite line numbers in that file, so a silent content change
+# there is not hypothetical.
+#
+# text=auto lets git detect which files are text; eol=lf pins the
+# working-tree ending so an editor on another machine cannot reintroduce
+# CRLF and produce the same unreviewable diff again.
+* text=auto eol=lf
+
+# Binary formats are never normalised. These carry incidental \r\n byte
+# pairs that a text pass would corrupt.
+*.parquet binary
+*.pyc     binary
+*.png     binary
+*.jpg     binary
