@@ -33,7 +33,10 @@ STATE_ORDER = ("night", "morning", "late_morning", "day", "evening", "early_nigh
 SUN_HANDLER_THROTTLE_SECONDS = 60
 NO_TRANSITION_LOG_INTERVAL = 15  # Log every Nth no-transition check (~15 min)
 
-# HA states that indicate a sensor is not reporting valid data
+# HA states that indicate a sensor is not reporting valid data, and equally
+# that a command sent to that entity will not turn anything on. `None` from
+# get_state is handled separately: a missing entity is a config error, an
+# unavailable one is usually a flat battery or a device off the network.
 HA_UNAVAILABLE_STATES = frozenset({"unavailable", "unknown", ""})
 
 
@@ -103,6 +106,7 @@ class AutomaticLights(hass.Hass):
         self._register_listeners()
         self._schedule_daily_events()
 
+        self._audit_lighting_groups("startup")
         self._activate_cumulative_state(self.current_state)
 
         self.log("[A003] Initialization complete: state={}".format(self.current_state))
@@ -279,6 +283,144 @@ class AutomaticLights(hass.Hass):
         )
 
     # ── Group and area setup ───────────────────────────────────────
+
+    def _entity_reachability(self, entity_id: str) -> tuple[bool, str]:
+        """Return (reachable, why). `why` is the state, or 'missing'."""
+        state = self.get_state(entity_id)
+        if state is None:
+            return False, "missing"
+        text = str(state).lower()
+        if text in HA_UNAVAILABLE_STATES:
+            return False, text
+        return True, text
+
+    def _unreachable_members(self, group_id: str) -> list[tuple[str, str]]:
+        """Members of `group_id` that would not respond to a command."""
+        broken = []
+        for entity_id in self.groups.get(group_id, []):
+            reachable, why = self._entity_reachability(entity_id)
+            if not reachable:
+                broken.append((entity_id, why))
+        return broken
+
+    def _scenes_using(self, group_name: str) -> list[str]:
+        """Scene names referencing this group, so a warning can name them."""
+        return sorted(
+            name for name, config in self.scenes.items() if group_name in config
+        )
+
+    def _configured_group_names(self) -> list[str]:
+        """Group names any scene refers to, deduplicated, in first-seen order."""
+        seen: dict[str, None] = {}
+        for config in self.scenes.values():
+            for group_name in config:
+                seen.setdefault(group_name, None)
+        return list(seen)
+
+    def _audit_lighting_groups(self, context: str) -> int:
+        """Warn about every group member that cannot respond to a command.
+
+        Why this exists. On 2026-09-03 `group.bedroom_lightning` had exactly one
+        member and that member was unavailable, so the late_morning, early_night
+        and evening scenes had all been commanding a group that could not
+        respond. The app logged "[H001] Turned ON" every time and nothing said
+        otherwise. The group's own state read `unknown` rather than `off`.
+
+        Returns the number of unreachable members, so callers and tests can
+        assert on a number rather than on log text.
+        """
+        self.log("[U001] Reachability audit ({})".format(context))
+        total = 0
+
+        for group_name in self._configured_group_names():
+            group_id = "group.{}".format(group_name)
+            members = self.groups.get(group_id, [])
+            scenes = self._scenes_using(group_name) or ["none"]
+
+            if not members:
+                self.log(
+                    "[U004] Group '{}' has no members but is referenced by "
+                    "scene(s) {} -- those scenes control nothing".format(
+                        group_name, ", ".join(scenes)
+                    ),
+                    level="WARNING",
+                )
+                continue
+
+            broken = self._unreachable_members(group_id)
+            total += len(broken)
+            if not broken:
+                continue
+
+            # A group where every member is down is a different problem from
+            # one bad bulb: the scene has no effect at all. That is exactly what
+            # went unnoticed with bedroom_lightning, so it gets its own level.
+            if len(broken) == len(members):
+                self.log(
+                    "[U003] Group '{}' is ENTIRELY unreachable ({}/{}): {} -- "
+                    "scene(s) {} command nothing".format(
+                        group_name,
+                        len(broken),
+                        len(members),
+                        ", ".join("{} is {}".format(e, w) for e, w in broken),
+                        ", ".join(scenes),
+                    ),
+                    level="ERROR",
+                )
+                continue
+
+            for entity_id, why in broken:
+                self.log(
+                    "[U002] Group '{}': {} is {} -- wanted by scene(s) {}".format(
+                        group_name, entity_id, why, ", ".join(scenes)
+                    ),
+                    level="WARNING",
+                )
+
+        if total == 0:
+            self.log("[U005] Reachability audit clean ({})".format(context))
+        return total
+
+    def _audit_scene_entities(
+        self, scene_name: str, entities: list[EntityControl]
+    ) -> int:
+        """Warn about the entities this scene is about to fail to control."""
+        broken = []
+        for control in entities:
+            reachable, why = self._entity_reachability(control.entity_id)
+            if not reachable:
+                broken.append((control, why))
+
+        if not broken:
+            return 0
+
+        if len(broken) == len(entities):
+            self.log(
+                "[U006] Scene '{}' will control NOTHING: all {} entities are "
+                "unreachable ({})".format(
+                    scene_name,
+                    len(entities),
+                    ", ".join(
+                        "{} is {}".format(c.entity_id, w) for c, w in broken
+                    ),
+                ),
+                level="ERROR",
+            )
+            return len(broken)
+
+        self.log(
+            "[U007] Scene '{}': {} of {} entities unreachable -- {}".format(
+                scene_name,
+                len(broken),
+                len(entities),
+                ", ".join(
+                    "{} ({}) is {}".format(c.entity_id, c.group, w)
+                    for c, w in broken
+                ),
+            ),
+            level="WARNING",
+        )
+        return len(broken)
 
     def _setup_groups_and_areas(self):
         """Setup groups and area mapping."""
@@ -780,6 +922,7 @@ class AutomaticLights(hass.Hass):
                 scene_name, len(entities)
             )
         )
+        self._audit_scene_entities(scene_name, entities)
 
         if not entities:
             return
@@ -884,7 +1027,7 @@ class AutomaticLights(hass.Hass):
         self.log("[G013] Staggered control scheduled")
 
     def _turn_onoff(self, **kwargs):
-        """Turn an entity on or off."""
+        """Turn an entity on or off, and be honest about whether it can land."""
         entity = kwargs.get("entity")
         state = kwargs.get("state")
 
@@ -894,13 +1037,19 @@ class AutomaticLights(hass.Hass):
             )
             return
 
+        # Read reachability BEFORE commanding. The command is still issued
+        # either way, so a device that comes back finds the right state waiting
+        # for it -- what changes is that an unreachable entity no longer gets
+        # logged as a success. "[H001] Turned ON" against a dead entity is
+        # precisely the line that let bedroom_lightning look healthy for weeks
+        # while commanding nothing at all.
+        reachable, why = self._entity_reachability(entity)
+
         try:
             if state:
                 self.turn_on(entity)
-                self.log("[H001] Turned ON: {}".format(entity))
             else:
                 self.turn_off(entity)
-                self.log("[H002] Turned OFF: {}".format(entity))
         except Exception as exc:
             if isinstance(exc, (TypeError, AttributeError, NameError)):
                 raise  # Programming error, do not swallow
@@ -910,3 +1059,19 @@ class AutomaticLights(hass.Hass):
                 ),
                 level="ERROR",
             )
+            return
+
+        if not reachable:
+            self.log(
+                "[U008] Commanded {} {} but it is {} -- the command cannot "
+                "have taken effect".format(
+                    entity, "ON" if state else "OFF", why
+                ),
+                level="WARNING",
+            )
+            return
+
+        if state:
+            self.log("[H001] Turned ON: {}".format(entity))
+        else:
+            self.log("[H002] Turned OFF: {}".format(entity))

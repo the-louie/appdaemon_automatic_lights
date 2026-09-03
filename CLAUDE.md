@@ -61,8 +61,35 @@ All log messages use bracketed codes for traceability:
 - `G0xx` — Staggered control scheduling
 - `H0xx` — Entity on/off control
 - `S0xx` — Sensor reads and transition checks
+- `U0xx` — Reachability audit: entities that cannot respond to a command (U001-U008)
 
 When adding new log lines, follow this convention and use the next available code in the appropriate range.
+
+### The `U0xx` range, and why it exists
+
+Added 2026-09-03 (S4-04). `group.bedroom_lightning` had one member, that member was
+`unavailable`, and the `late_morning`, `early_night` and `evening` scenes had all been
+commanding it for an unknown length of time. The app logged `[H001] Turned ON` every time.
+Nothing anywhere said otherwise, and the group's own state read `unknown` rather than `off`.
+
+| code | level | meaning |
+|---|---|---|
+| `U001` | INFO | audit starting, with its context (`startup`, or a scene name) |
+| `U002` | WARNING | one member of a group is unreachable; names the scenes that want it |
+| `U003` | **ERROR** | *every* member of a group is unreachable — the scene controls nothing |
+| `U004` | WARNING | a scene names a group that has no members at all |
+| `U005` | INFO | audit clean |
+| `U006` | **ERROR** | a scene activation where every entity is unreachable |
+| `U007` | WARNING | a scene activation where some entities are unreachable |
+| `U008` | WARNING | a command was issued to an entity that is unreachable |
+
+**`U003`/`U006` are ERROR on purpose.** A group with one dead bulb is a maintenance note; a
+group where nothing responds means a scene silently does nothing, which is the failure that
+went unnoticed. They are different events and should not share a severity.
+
+**`U008` replaces a success line, it does not add to one.** `_turn_onoff` still issues the
+command to an unreachable entity — a device that comes back should find the right state
+waiting for it — but it no longer logs `H001`/`H002` when the command cannot have landed.
 
 ## HA entities used
 
