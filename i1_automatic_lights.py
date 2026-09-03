@@ -403,11 +403,13 @@ class AutomaticLights(hass.Hass):
     # ── Group and area setup ───────────────────────────────────────
 
     def _today(self) -> datetime.date:
-        """Today, on AppDaemon's clock rather than the process's."""
-        try:
-            return self.get_now().date()
-        except Exception:
-            return datetime.datetime.now().date()
+        """Today, on AppDaemon's clock rather than the process's.
+
+        No fallback to datetime.now(): that is the container's timezone, not
+        Home Assistant's, and if get_now() is unavailable the app has a bigger
+        problem than a date. Tests override this method.
+        """
+        return self.get_now().date()
 
     def _positive_number(self, value, default: float, key: str) -> float:
         """A knob that must be a positive number, or the default, loudly."""
@@ -710,16 +712,13 @@ class AutomaticLights(hass.Hass):
         return sent
 
     def _now_epoch(self) -> float:
-        try:
-            return self.get_now().timestamp()
-        except Exception:
-            return time.time()
+        """Epoch seconds. Note .timestamp(), not datetime subtraction: two
+        datetimes sharing a tzinfo subtract to WALL-CLOCK difference, which is
+        an hour wrong across the 25 October fold."""
+        return self.get_now().timestamp()
 
     def _now_hour(self) -> int:
-        try:
-            return self.get_now().hour
-        except Exception:
-            return datetime.datetime.now().hour
+        return self.get_now().hour
 
     # ── Did it actually happen ─────────────────────────────────────
 
@@ -798,10 +797,7 @@ class AutomaticLights(hass.Hass):
             del self.audit_history[: -self.audit_history_limit]
 
     def _now_text(self) -> str:
-        try:
-            return self.get_now().isoformat(timespec="seconds")
-        except Exception:
-            return datetime.datetime.now().isoformat(timespec="seconds")
+        return self.get_now().isoformat(timespec="seconds")
 
     def _schedule_verification(
         self, scene_name: str, entities: list[EntityControl], after: float
