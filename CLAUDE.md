@@ -9,6 +9,9 @@ Single-file AppDaemon app (`i1_automatic_lights.py`) that automates lighting bas
 ## Architecture
 
 - **Single module**: `i1_automatic_lights.py` contains the `AutomaticLights` class (extends `hass.Hass`)
+- **`notification_policy.py`** — a byte-identical copy of the canonical module in
+  `appdaemon_watchdog`. Do not edit it here; re-copy. `test_policy_copies_match.py` turns
+  drift into a test failure.
 - **Configuration**: `config.yaml` (live, gitignored) / `config.yaml.example` (committed reference)
 - **No tests or separate packages** — flat structure, deployed directly to AppDaemon's `apps` directory
 
@@ -63,6 +66,7 @@ All log messages use bracketed codes for traceability:
 - `S0xx` — Sensor reads and transition checks
 - `U0xx` — Reachability audit: entities that cannot respond to a command (U001-U013)
 - `V0xx` — Verification: whether a scene's commands actually took effect (V001-V008)
+- `N0xx` — Notification of divergences (N001-N006)
 
 When adding new log lines, follow this convention and use the next available code in the appropriate range.
 
@@ -131,6 +135,36 @@ worthless.
 scheduler never fired, which is a bigger fault than a single light being off, and it is the
 failure mode that would otherwise look identical to success.
 
+### The `N0xx` range — telling someone
+
+Added 2026-09-03 (S4-07). A divergence in the log is a divergence nobody sees.
+
+| code | level | meaning |
+|---|---|---|
+| `N001` | WARNING/ERROR | a bad `notify_targets` / channel / quiet-hour value |
+| `N002` | WARNING | **no targets configured — nobody will be told** |
+| `N003` | INFO | notification sent, and to whom |
+| `N004` | **ERROR** | one target failed; the others were still tried |
+| `N005` | INFO | divergences held by the repeat/quiet-hours policy |
+| `N006` | INFO | a light recovered, so its next failure counts as news again |
+
+Uses the shared `notification_policy.py`, byte-identical to the canonical copy in
+`appdaemon_watchdog` (`test_policy_copies_match.py` fails on drift). Quiet hours 22–07,
+re-alert after 6h, and the **first occurrence always sends** even inside quiet hours.
+
+**Keyed per entity, not per scene.** One stuck light must not produce a message at every
+transition all day, and a second light failing must still be news while the first is held.
+
+**`notify_targets` is optional here, unlike the watchdog.** The watchdog raises without it,
+because a watchdog that cannot speak is pointless. This app controlled lights correctly long
+before it could notify anything, so making the key mandatory would stop every light in the
+house on the next pull. It warns once at startup instead — silence about being unable to
+speak is the failure this range exists to remove.
+
+**`N006` matters more than it looks.** When a light recovers, its entry must be cleared from
+the re-alert state, or its *next* failure is treated as a repeat and held. That bug was
+written and caught by its own test.
+
 **`U008` replaces a success line, it does not add to one.** `_turn_onoff` still issues the
 command to an unreachable entity — a device that comes back should find the right state
 waiting for it — but it no longer logs `H001`/`H002` when the command cannot have landed.
@@ -144,7 +178,7 @@ waiting for it — but it no longer logs `H001`/`H002` when the command cannot h
 ## Configuration keys
 
 Required: `morning_start`, `night_start`, `scenes`
-Optional: `late_morning_start`, `early_night_start`, `solar_radiation` (with `sensor`, `threshold`, `elevation_threshold`), `staggering` (with `light_delay_min/max`, `room_delay_min/max`), `expected_absent` (entity_id -> `reason` + `review`), `audit` (with `verify_margin_seconds`, `history`), `audit_daily_report_time`
+Optional: `late_morning_start`, `early_night_start`, `solar_radiation` (with `sensor`, `threshold`, `elevation_threshold`), `staggering` (with `light_delay_min/max`, `room_delay_min/max`), `expected_absent` (entity_id -> `reason` + `review`), `audit` (with `verify_margin_seconds`, `history`), `audit_daily_report_time`, `notify_targets`, `notification_channel`, `notification_priority`, `quiet_start`, `quiet_end`, `repeat_after`
 
 All time config values are validated at load time via `_parse_time_config` with fallback to defaults.
 

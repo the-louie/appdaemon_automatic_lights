@@ -30,6 +30,29 @@ automatic_lights:
   # Groups not listed in a scene retain their state from earlier transitions.
   # On init/restart, the app replays all predecessor scenes up to the current
   # state to reconstruct the correct cumulative lighting state.
+  # ── Telling someone when a light misbehaves ──────────────────────────
+  # OPTIONAL. Without it, divergences are logged and nobody is told -- the app
+  # says so once at startup (N002) rather than pretending otherwise.
+  #
+  # Service names WITHOUT the notify. domain: `mobile_app_phone`, not
+  # `notify.mobile_app_phone`. A prefixed name is corrected and reported.
+  notify_targets:
+    - mobile_app_phone
+
+  # T-52, and do not remove this. A notification that names no channel goes to
+  # the companion app's DEFAULT channel, which on this household's phone is
+  # disabled: Android discards it and Home Assistant reports success.
+  notification_channel: light_alerts
+  notification_priority: high
+
+  # Re-alert policy, shared with the watchdog and the weather alarms.
+  # The FIRST occurrence always sends, even inside quiet hours -- a light that
+  # breaks at 23:00 should not wait until 07:00. Only repeats are held.
+  # Keyed per entity, so one stuck light does not mask a second one failing.
+  quiet_start: 22
+  quiet_end: 7
+  repeat_after: 21600   # 6 hours
+
   # ── Verification: did the scene actually happen ──────────────────────
   # After each scene activation the app re-reads every entity it commanded and
   # compares against what it asked for. A divergence is an entity that is

@@ -8,9 +8,11 @@ from __future__ import annotations
 import datetime
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import appdaemon.plugins.hass.hassapi as hass
+
+import notification_policy as policy
 
 # Configuration defaults
 DEFAULT_ELEVATION_THRESHOLD = 3.0
@@ -35,6 +37,12 @@ STATE_ORDER = ("night", "morning", "late_morning", "day", "evening", "early_nigh
 DEFAULT_AUDIT_MARGIN_SECONDS = 30
 DEFAULT_AUDIT_HISTORY = 200
 DEFAULT_DAILY_REPORT_TIME = "23:55:00"
+
+# Notification. The channel matters: a notification that names no channel goes
+# to the companion app's default one, which on this household's phone is
+# disabled -- Android discards it while Home Assistant reports success (T-52).
+DEFAULT_NOTIFY_CHANNEL = "light_alerts"
+DEFAULT_NOTIFY_PRIORITY = "high"
 
 # Throttle / logging
 SUN_HANDLER_THROTTLE_SECONDS = 60
@@ -118,6 +126,7 @@ class AuditResult:
     checked: int
     skipped: int
     diverged: list[Divergence]
+    checked_ids: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -159,6 +168,13 @@ class AutomaticLights(hass.Hass):
         self.audit_margin: float = DEFAULT_AUDIT_MARGIN_SECONDS
         self.audit_history_limit: int = DEFAULT_AUDIT_HISTORY
         self.daily_report_time: str = DEFAULT_DAILY_REPORT_TIME
+        self.notify_targets: list[str] = []
+        self.notification_channel: str | None = DEFAULT_NOTIFY_CHANNEL
+        self.notification_priority: str | None = DEFAULT_NOTIFY_PRIORITY
+        self.quiet_start: int = policy.DEFAULT_QUIET_START
+        self.quiet_end: int = policy.DEFAULT_QUIET_END
+        self.repeat_after: float = policy.DEFAULT_REPEAT_AFTER
+        self._notify_state: dict[str, float] = {}
         self._pending_timers: list = []
 
     def initialize(self):
@@ -225,6 +241,7 @@ class AutomaticLights(hass.Hass):
         self.daily_report_time = self._parse_time_config(
             "audit_daily_report_time", DEFAULT_DAILY_REPORT_TIME
         )
+        self._load_notify_config()
 
         # Solar radiation
         solar_raw = self.args.get("solar_radiation", {})
@@ -503,6 +520,207 @@ class AutomaticLights(hass.Hass):
             return "expired", entry
         return "expected", entry
 
+    # ── Telling someone ────────────────────────────────────────────
+
+    def _load_notify_config(self):
+        """Notification is opt-in, and its absence is stated rather than assumed.
+
+        The watchdog *raises* without `notify_targets`, because a watchdog that
+        cannot tell anyone is pointless. This app is different: it controlled
+        lights correctly for a long time before it could notify anything, and
+        making the key mandatory would stop every light in the house on the
+        next pull. So it is optional -- but silence about being unable to speak
+        is exactly the failure this whole sprint is about, so it says so once,
+        at startup, at WARNING.
+        """
+        raw = self.args.get("notify_targets") or []
+        if isinstance(raw, str):
+            raw = [raw]
+
+        targets: list[str] = []
+        if not isinstance(raw, list):
+            self.log(
+                "[N001] notify_targets must be a list of service names, got "
+                "{} -- divergences will be logged but not sent".format(
+                    type(raw).__name__
+                ),
+                level="ERROR",
+            )
+        else:
+            for target in raw:
+                if not isinstance(target, str) or not target.strip():
+                    self.log(
+                        "[N001] notify_targets entries must be non-empty "
+                        "strings, got {!r} -- skipped".format(target),
+                        level="ERROR",
+                    )
+                    continue
+                name = target.strip()
+                if name.startswith("notify."):
+                    # A whole sprint was lost to this shape once. Correct it and
+                    # say so rather than sending to a service that cannot exist.
+                    self.log(
+                        "[N001] notify_targets takes the service name without "
+                        "the domain: using {!r}, not {!r}".format(
+                            name[len("notify."):], name
+                        ),
+                        level="WARNING",
+                    )
+                    name = name[len("notify."):]
+                targets.append(name)
+
+        self.notify_targets = targets
+        if not targets:
+            self.log(
+                "[N002] No notify_targets configured -- light divergences will "
+                "be logged only. Nobody will be told.",
+                level="WARNING",
+            )
+
+        channel = self.args.get("notification_channel", DEFAULT_NOTIFY_CHANNEL)
+        self.notification_channel = channel if isinstance(channel, str) else None
+        if channel is not None and not isinstance(channel, str):
+            self.log(
+                "[N001] notification_channel must be a string, got {!r} -- "
+                "sending without one, which Android may discard".format(channel),
+                level="ERROR",
+            )
+        priority = self.args.get("notification_priority", DEFAULT_NOTIFY_PRIORITY)
+        self.notification_priority = priority if isinstance(priority, str) else None
+
+        self.quiet_start = int(
+            self._hour_config("quiet_start", policy.DEFAULT_QUIET_START)
+        )
+        self.quiet_end = int(
+            self._hour_config("quiet_end", policy.DEFAULT_QUIET_END)
+        )
+        self.repeat_after = self._positive_number(
+            self.args.get("repeat_after"), policy.DEFAULT_REPEAT_AFTER, "repeat_after"
+        )
+
+    def _hour_config(self, key: str, default: int) -> int:
+        value = self.args.get(key, default)
+        try:
+            hour = int(value)
+        except (ValueError, TypeError):
+            hour = None
+        if hour is None or not 0 <= hour <= 23:
+            self.log(
+                "[N001] {} must be an hour 0-23, got {!r} -- using {}".format(
+                    key, value, default
+                ),
+                level="WARNING",
+            )
+            return default
+        return hour
+
+    def _notification_data(self) -> dict:
+        """Companion-app data block. See T-52, and do not drop it.
+
+        A notification that does not name a channel goes to the companion app's
+        default channel, which on this household's phone is disabled. Android
+        discards it and Home Assistant reports success -- the exact shape of
+        failure this sprint exists to remove.
+        """
+        if not self.notification_channel:
+            return {}
+        data = {"channel": self.notification_channel}
+        if self.notification_priority:
+            data["priority"] = self.notification_priority
+            data["ttl"] = 0
+        return data
+
+    def _notify_divergences(self, result: AuditResult) -> list[str]:
+        """Tell someone, once per light per repeat window.
+
+        Keyed per entity rather than per scene, so a single stuck light does
+        not produce a message at every transition all day -- and so a second
+        light going wrong is still news even while the first is being held.
+        """
+        # A light that was reported and is now fine must have its state
+        # cleared, or its NEXT failure is held as a repeat and nobody is told.
+        # policy.apply drops keys absent from the active set for exactly this
+        # reason, but it only sees the entities of one scene, so the clearing
+        # has to be scoped to what this run actually checked.
+        healthy = set(result.checked_ids) - {d.entity_id for d in result.diverged}
+        for entity_id in healthy:
+            if self._notify_state.pop(entity_id, None) is not None:
+                self.log(
+                    "[N006] {} is back in the commanded state; its next failure "
+                    "will be reported as news".format(entity_id)
+                )
+
+        if result.clean or not self.notify_targets:
+            return []
+
+        keys = {d.entity_id for d in result.diverged}
+        now_epoch = self._now_epoch()
+        to_send, held, new_state = policy.apply(
+            keys,
+            now_epoch,
+            self._now_hour(),
+            self._notify_state,
+            quiet_start=self.quiet_start,
+            quiet_end=self.quiet_end,
+            repeat_after=self.repeat_after,
+        )
+        self._notify_state = new_state
+
+        if held:
+            self.log(
+                "[N005] Holding {} light divergence(s): {}".format(
+                    len(held),
+                    ", ".join("{} ({})".format(k, why) for k, why in held),
+                )
+            )
+        if not to_send:
+            return []
+
+        sending = {k for k, _ in to_send}
+        lines = [
+            "{} wanted {} but is {}".format(d.entity_id, d.expected, d.actual)
+            for d in result.diverged
+            if d.entity_id in sending
+        ]
+        body = "Scene '{}':\n{}".format(result.scene, "\n".join(lines))
+
+        sent = []
+        for target in self.notify_targets:
+            try:
+                self.call_service(
+                    "notify/{}".format(target),
+                    title="Lights did not do as told",
+                    message=body,
+                    data=self._notification_data(),
+                )
+                sent.append(target)
+            except Exception as exc:
+                if isinstance(exc, (TypeError, AttributeError, NameError)):
+                    raise
+                # One bad target must not stop the others being told.
+                self.log(
+                    "[N004] Could not notify {}: {}".format(target, exc),
+                    level="ERROR",
+                )
+        self.log(
+            "[N003] Notified {} about {} light divergence(s)".format(
+                ", ".join(sent) or "nobody", len(sending)
+            )
+        )
+        return sent
+
+    def _now_epoch(self) -> float:
+        try:
+            return self.get_now().timestamp()
+        except Exception:
+            return time.time()
+
+    def _now_hour(self) -> int:
+        try:
+            return self.get_now().hour
+        except Exception:
+            return datetime.datetime.now().hour
+
     # ── Did it actually happen ─────────────────────────────────────
 
     def _expected_text(self, target_state: bool) -> str:
@@ -521,7 +739,7 @@ class AutomaticLights(hass.Hass):
         expectations = kwargs.get("expectations") or []
 
         diverged: list[Divergence] = []
-        checked = 0
+        checked_ids: list[str] = []
         skipped = 0
 
         for entity_id, group, target in expectations:
@@ -534,7 +752,7 @@ class AutomaticLights(hass.Hass):
                 skipped += 1
                 continue
 
-            checked += 1
+            checked_ids.append(entity_id)
             want = self._expected_text(target)
             if actual != want:
                 diverged.append(Divergence(entity_id, group, want, actual))
@@ -542,16 +760,17 @@ class AutomaticLights(hass.Hass):
         result = AuditResult(
             scene=scene_name,
             when=self._now_text(),
-            checked=checked,
+            checked=len(checked_ids),
             skipped=skipped,
             diverged=diverged,
+            checked_ids=checked_ids,
         )
         self._record_audit(result)
 
         if result.clean:
             self.log(
                 "[V001] Scene '{}' verified: {} entities in the commanded "
-                "state ({} skipped)".format(scene_name, checked, skipped)
+                "state ({} skipped)".format(scene_name, len(checked_ids), skipped)
             )
         else:
             self.log(
@@ -559,7 +778,7 @@ class AutomaticLights(hass.Hass):
                 "commanded state -- {}".format(
                     scene_name,
                     len(diverged),
-                    checked,
+                    len(checked_ids),
                     ", ".join(
                         "{} ({}) wanted {} but is {}".format(
                             d.entity_id, d.group, d.expected, d.actual
@@ -569,6 +788,7 @@ class AutomaticLights(hass.Hass):
                 ),
                 level="WARNING",
             )
+        self._notify_divergences(result)
         return result
 
     def _record_audit(self, result: AuditResult):
