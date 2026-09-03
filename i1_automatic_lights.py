@@ -5,6 +5,7 @@ Copyright (c) 2025 the_louie
 
 from __future__ import annotations
 
+import datetime
 import random
 import time
 from dataclasses import dataclass
@@ -64,6 +65,27 @@ class StaggerConfig:
 
 
 @dataclass
+class ExpectedAbsence:
+    """An entity that is *supposed* to be unavailable, for a stated period.
+
+    `switch.v2_kok_girlang` is a Christmas ornament. It is unplugged for eleven
+    months of the year, so an alarm on it would fire from December to November
+    and teach everyone to ignore the alarm -- which is worse than not having
+    one. Suppressing it needs two things and neither is optional:
+
+    `reason`  -- a suppression nobody can explain is a suppression nobody dares
+                 remove, so it becomes permanent by default.
+    `review`  -- past this date the entry stops suppressing and starts warning
+                 about itself. That is the difference between a decision with an
+                 expiry and a silence that outlives the person who set it.
+    """
+
+    entity_id: str
+    reason: str
+    review: datetime.date
+
+
+@dataclass
 class EntityControl:
     """A single entity to be controlled during a scene activation."""
 
@@ -93,6 +115,7 @@ class AutomaticLights(hass.Hass):
         self.early_night_start: str | None = DEFAULT_EARLY_NIGHT_START
         self.night_start: str = DEFAULT_NIGHT_START
         self.scenes: dict = {}
+        self.expected_absent: dict[str, ExpectedAbsence] = {}
         self._pending_timers: list = []
 
     def initialize(self):
@@ -143,6 +166,7 @@ class AutomaticLights(hass.Hass):
             "night_start", DEFAULT_NIGHT_START
         )
         self.scenes = self.args.get("scenes", {})
+        self.expected_absent = self._load_expected_absent()
 
         # Solar radiation
         solar_raw = self.args.get("solar_radiation", {})
@@ -284,6 +308,107 @@ class AutomaticLights(hass.Hass):
 
     # ── Group and area setup ───────────────────────────────────────
 
+    def _today(self) -> datetime.date:
+        """Today, on AppDaemon's clock rather than the process's."""
+        try:
+            return self.get_now().date()
+        except Exception:
+            return datetime.datetime.now().date()
+
+    def _load_expected_absent(self) -> dict[str, ExpectedAbsence]:
+        """Parse `expected_absent`, rejecting entries loudly rather than silently.
+
+        Per D1 (fail loud), a malformed entry is dropped and reported. Dropping
+        it means the entity goes back to warning normally, which is the safe
+        direction: a broken suppression should make noise, not silence.
+        """
+        raw = self.args.get("expected_absent") or {}
+        if not isinstance(raw, dict):
+            self.log(
+                "[U012] expected_absent must be a mapping of entity_id to "
+                "{{reason, review}}, got {} -- ignoring all of it".format(
+                    type(raw).__name__
+                ),
+                level="ERROR",
+            )
+            return {}
+
+        parsed: dict[str, ExpectedAbsence] = {}
+        for entity_id, spec in raw.items():
+            if not isinstance(spec, dict):
+                self.log(
+                    "[U012] expected_absent['{}'] must be a mapping with "
+                    "reason and review, got {} -- entry ignored".format(
+                        entity_id, type(spec).__name__
+                    ),
+                    level="ERROR",
+                )
+                continue
+
+            reason = str(spec.get("reason") or "").strip()
+            if not reason:
+                self.log(
+                    "[U012] expected_absent['{}'] has no reason -- entry "
+                    "ignored. A suppression nobody can explain is one nobody "
+                    "dares remove.".format(entity_id),
+                    level="ERROR",
+                )
+                continue
+
+            review_raw = spec.get("review")
+            if review_raw is None:
+                self.log(
+                    "[U012] expected_absent['{}'] has no review date -- entry "
+                    "ignored. Without one the suppression is permanent.".format(
+                        entity_id
+                    ),
+                    level="ERROR",
+                )
+                continue
+
+            review = self._parse_review_date(entity_id, review_raw)
+            if review is None:
+                continue
+
+            parsed[entity_id] = ExpectedAbsence(entity_id, reason, review)
+
+        if parsed:
+            self.log(
+                "[U013] {} expected-absent entrie(s): {}".format(
+                    len(parsed),
+                    ", ".join(
+                        "{} until {}".format(e.entity_id, e.review)
+                        for e in parsed.values()
+                    ),
+                )
+            )
+        return parsed
+
+    def _parse_review_date(self, entity_id: str, value) -> datetime.date | None:
+        """Accept a real date from YAML, or an ISO string. Reject anything else."""
+        if isinstance(value, datetime.datetime):
+            return value.date()
+        if isinstance(value, datetime.date):
+            return value
+        try:
+            return datetime.date.fromisoformat(str(value).strip())
+        except (ValueError, TypeError):
+            self.log(
+                "[U012] expected_absent['{}'] review '{}' is not a YYYY-MM-DD "
+                "date -- entry ignored".format(entity_id, value),
+                level="ERROR",
+            )
+            return None
+
+    def _absence_verdict(self, entity_id: str) -> tuple[str, ExpectedAbsence | None]:
+        """Classify an unreachable entity: 'unexpected', 'expected', 'expired'."""
+        entry = self.expected_absent.get(entity_id)
+        if entry is None:
+            return "unexpected", None
+        if self._today() > entry.review:
+            return "expired", entry
+        return "expected", entry
+
     def _entity_reachability(self, entity_id: str) -> tuple[bool, str]:
         """Return (reachable, why). `why` is the state, or 'missing'."""
         state = self.get_state(entity_id)
@@ -348,8 +473,48 @@ class AutomaticLights(hass.Hass):
                 continue
 
             broken = self._unreachable_members(group_id)
-            total += len(broken)
+            broken_ids = {e for e, _ in broken}
+
+            # An entity that is reachable but still on the expected-absent list
+            # has come back. Say so, or the entry outlives its own reason.
+            for entity_id in members:
+                if entity_id in self.expected_absent and entity_id not in broken_ids:
+                    self.log(
+                        "[U011] {} is reachable again but is still listed as "
+                        "expected-absent ({}) -- remove the entry".format(
+                            entity_id, self.expected_absent[entity_id].reason
+                        )
+                    )
+
             if not broken:
+                continue
+
+            # Split by verdict before deciding severity. A group that is dark on
+            # purpose is not the same event as one that is dark by accident.
+            unexpected: list[tuple[str, str]] = []
+            for entity_id, why in broken:
+                verdict, entry = self._absence_verdict(entity_id)
+                if verdict == "expected":
+                    self.log(
+                        "[U009] Group '{}': {} is {}, expected until {} ({})".format(
+                            group_name, entity_id, why, entry.review, entry.reason
+                        )
+                    )
+                elif verdict == "expired":
+                    self.log(
+                        "[U010] Group '{}': {} is {} and its expected-absent "
+                        "entry expired on {} ({}) -- confirm it is still "
+                        "expected, or fix the device".format(
+                            group_name, entity_id, why, entry.review, entry.reason
+                        ),
+                        level="WARNING",
+                    )
+                    unexpected.append((entity_id, why))
+                else:
+                    unexpected.append((entity_id, why))
+
+            total += len(unexpected)
+            if not unexpected:
                 continue
 
             # A group where every member is down is a different problem from
@@ -369,7 +534,7 @@ class AutomaticLights(hass.Hass):
                 )
                 continue
 
-            for entity_id, why in broken:
+            for entity_id, why in unexpected:
                 self.log(
                     "[U002] Group '{}': {} is {} -- wanted by scene(s) {}".format(
                         group_name, entity_id, why, ", ".join(scenes)
@@ -388,8 +553,12 @@ class AutomaticLights(hass.Hass):
         broken = []
         for control in entities:
             reachable, why = self._entity_reachability(control.entity_id)
-            if not reachable:
-                broken.append((control, why))
+            if reachable:
+                continue
+            verdict, _entry = self._absence_verdict(control.entity_id)
+            if verdict == "expected":
+                continue  # dark on purpose; the startup audit records it
+            broken.append((control, why))
 
         if not broken:
             return 0
@@ -1062,13 +1231,15 @@ class AutomaticLights(hass.Hass):
             return
 
         if not reachable:
-            self.log(
-                "[U008] Commanded {} {} but it is {} -- the command cannot "
-                "have taken effect".format(
-                    entity, "ON" if state else "OFF", why
-                ),
-                level="WARNING",
-            )
+            verdict, _entry = self._absence_verdict(entity)
+            if verdict != "expected":
+                self.log(
+                    "[U008] Commanded {} {} but it is {} -- the command cannot "
+                    "have taken effect".format(
+                        entity, "ON" if state else "OFF", why
+                    ),
+                    level="WARNING",
+                )
             return
 
         if state:

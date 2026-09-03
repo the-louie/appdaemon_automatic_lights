@@ -30,6 +30,26 @@ automatic_lights:
   # Groups not listed in a scene retain their state from earlier transitions.
   # On init/restart, the app replays all predecessor scenes up to the current
   # state to reconstruct the correct cumulative lighting state.
+  # ── Expected absences ────────────────────────────────────────────────
+  # Entities that are SUPPOSED to be unavailable, so the reachability audit
+  # (U0xx) does not warn about them. Both keys are required and neither is
+  # decoration:
+  #
+  #   reason  a suppression nobody can explain is a suppression nobody dares
+  #           remove, so it becomes permanent by default.
+  #   review  after this date the entry stops suppressing and starts warning
+  #           about itself (U010). That is what separates a decision with an
+  #           expiry from a silence that outlives the person who set it.
+  #
+  # A malformed entry is rejected loudly and does NOT suppress -- the safe
+  # direction, because a broken suppression should make noise, not hide a fault.
+  # An entity that comes back while still listed is reported too (U011), so the
+  # list does not quietly accumulate.
+  expected_absent:
+    switch.v2_kok_girlang:
+      reason: Christmas ornament, unplugged for eleven months of the year
+      review: 2026-12-01
+
   scenes:
     night:
       group.specific_lighting: false

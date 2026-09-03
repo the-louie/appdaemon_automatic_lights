@@ -82,10 +82,22 @@ Nothing anywhere said otherwise, and the group's own state read `unknown` rather
 | `U006` | **ERROR** | a scene activation where every entity is unreachable |
 | `U007` | WARNING | a scene activation where some entities are unreachable |
 | `U008` | WARNING | a command was issued to an entity that is unreachable |
+| `U009` | INFO | unreachable, but on the expected-absent list and still in date |
+| `U010` | WARNING | an expected-absent entry is **past its review date** |
+| `U011` | INFO | a listed entity is reachable again — remove the entry |
+| `U012` | **ERROR** | a malformed `expected_absent` entry, rejected |
+| `U013` | INFO | summary of the expected-absent entries loaded |
 
 **`U003`/`U006` are ERROR on purpose.** A group with one dead bulb is a maintenance note; a
 group where nothing responds means a scene silently does nothing, which is the failure that
 went unnoticed. They are different events and should not share a severity.
+
+**The `expected_absent` list (S4-05).** `switch.v2_kok_girlang` is a Christmas ornament,
+unplugged eleven months a year. An audit that warns about it from December to November is
+worse than no audit, because people stop reading it — including in the month it is right.
+Entries require both a `reason` and a `review` date; a malformed entry is rejected and does
+**not** suppress, which is the safe direction. Past its review date an entry stops
+suppressing and starts warning about itself, so the list cannot silently become permanent.
 
 **`U008` replaces a success line, it does not add to one.** `_turn_onoff` still issues the
 command to an unreachable entity — a device that comes back should find the right state
@@ -100,7 +112,7 @@ waiting for it — but it no longer logs `H001`/`H002` when the command cannot h
 ## Configuration keys
 
 Required: `morning_start`, `night_start`, `scenes`
-Optional: `late_morning_start`, `early_night_start`, `solar_radiation` (with `sensor`, `threshold`, `elevation_threshold`), `staggering` (with `light_delay_min/max`, `room_delay_min/max`)
+Optional: `late_morning_start`, `early_night_start`, `solar_radiation` (with `sensor`, `threshold`, `elevation_threshold`), `staggering` (with `light_delay_min/max`, `room_delay_min/max`), `expected_absent` (entity_id -> `reason` + `review`)
 
 All time config values are validated at load time via `_parse_time_config` with fallback to defaults.
 
