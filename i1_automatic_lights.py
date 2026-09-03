@@ -30,6 +30,12 @@ TIME_STATE_ENTITY = "irisone.time_state"
 # State machine order for cumulative scene merging on init
 STATE_ORDER = ("night", "morning", "late_morning", "day", "evening", "early_night")
 
+# Verification: how long after the last staggered command to check the result,
+# how many results to keep, and when to summarise the day.
+DEFAULT_AUDIT_MARGIN_SECONDS = 30
+DEFAULT_AUDIT_HISTORY = 200
+DEFAULT_DAILY_REPORT_TIME = "23:55:00"
+
 # Throttle / logging
 SUN_HANDLER_THROTTLE_SECONDS = 60
 NO_TRANSITION_LOG_INTERVAL = 15  # Log every Nth no-transition check (~15 min)
@@ -86,6 +92,39 @@ class ExpectedAbsence:
 
 
 @dataclass
+class Divergence:
+    """One entity that did not end up where the scene put it."""
+
+    entity_id: str
+    group: str
+    expected: str
+    actual: str
+
+
+@dataclass
+class AuditResult:
+    """What a scene asked for, against what the house actually did.
+
+    The reachability audit (U0xx) answers "could this command land". This
+    answers the different and harder question: "did it". An entity can be
+    perfectly reachable, accept the command, and still not be in the commanded
+    state a minute later -- someone used the wall switch, a bulb dropped off
+    and rejoined, a competing app wrote over it. Nothing in this system has
+    ever looked.
+    """
+
+    scene: str
+    when: str
+    checked: int
+    skipped: int
+    diverged: list[Divergence]
+
+    @property
+    def clean(self) -> bool:
+        return not self.diverged
+
+
+@dataclass
 class EntityControl:
     """A single entity to be controlled during a scene activation."""
 
@@ -116,6 +155,10 @@ class AutomaticLights(hass.Hass):
         self.night_start: str = DEFAULT_NIGHT_START
         self.scenes: dict = {}
         self.expected_absent: dict[str, ExpectedAbsence] = {}
+        self.audit_history: list[AuditResult] = []
+        self.audit_margin: float = DEFAULT_AUDIT_MARGIN_SECONDS
+        self.audit_history_limit: int = DEFAULT_AUDIT_HISTORY
+        self.daily_report_time: str = DEFAULT_DAILY_REPORT_TIME
         self._pending_timers: list = []
 
     def initialize(self):
@@ -128,6 +171,7 @@ class AutomaticLights(hass.Hass):
 
         self._register_listeners()
         self._schedule_daily_events()
+        self._schedule_daily_report()
 
         self._audit_lighting_groups("startup")
         self._activate_cumulative_state(self.current_state)
@@ -167,6 +211,20 @@ class AutomaticLights(hass.Hass):
         )
         self.scenes = self.args.get("scenes", {})
         self.expected_absent = self._load_expected_absent()
+
+        audit_raw = self.args.get("audit") or {}
+        self.audit_margin = self._positive_number(
+            audit_raw.get("verify_margin_seconds"), DEFAULT_AUDIT_MARGIN_SECONDS,
+            "audit.verify_margin_seconds",
+        )
+        self.audit_history_limit = int(
+            self._positive_number(
+                audit_raw.get("history"), DEFAULT_AUDIT_HISTORY, "audit.history"
+            )
+        )
+        self.daily_report_time = self._parse_time_config(
+            "audit_daily_report_time", DEFAULT_DAILY_REPORT_TIME
+        )
 
         # Solar radiation
         solar_raw = self.args.get("solar_radiation", {})
@@ -256,6 +314,25 @@ class AutomaticLights(hass.Hass):
             self._handle_manual_scene, event="call_service", domain="scene"
         )
 
+    def _schedule_daily_report(self):
+        """One summary a day, so a quiet day is visibly quiet rather than absent."""
+        if not self.daily_report_time:
+            return
+        try:
+            self.run_daily(self._daily_light_report, self.daily_report_time)
+            self.log(
+                "[V007] Daily light report scheduled for {}".format(
+                    self.daily_report_time
+                )
+            )
+        except Exception as exc:
+            if isinstance(exc, (TypeError, AttributeError, NameError)):
+                raise
+            self.log(
+                "[V008] Could not schedule the daily light report: {}".format(exc),
+                level="ERROR",
+            )
+
     def _schedule_daily_events(self):
         """Schedule daily time-based transitions."""
         self.run_daily(
@@ -314,6 +391,23 @@ class AutomaticLights(hass.Hass):
             return self.get_now().date()
         except Exception:
             return datetime.datetime.now().date()
+
+    def _positive_number(self, value, default: float, key: str) -> float:
+        """A knob that must be a positive number, or the default, loudly."""
+        if value is None:
+            return default
+        try:
+            number = float(value)
+        except (ValueError, TypeError):
+            number = None
+        if number is None or number <= 0:
+            self.log(
+                "[A013] {} must be a positive number, got {!r} -- using "
+                "{}".format(key, value, default),
+                level="WARNING",
+            )
+            return default
+        return number
 
     def _load_expected_absent(self) -> dict[str, ExpectedAbsence]:
         """Parse `expected_absent`, rejecting entries loudly rather than silently.
@@ -408,6 +502,159 @@ class AutomaticLights(hass.Hass):
         if self._today() > entry.review:
             return "expired", entry
         return "expected", entry
+
+    # ── Did it actually happen ─────────────────────────────────────
+
+    def _expected_text(self, target_state: bool) -> str:
+        return "on" if target_state else "off"
+
+    def _verify_scene(self, kwargs):
+        """Compare what a scene commanded against what the house did.
+
+        Runs once per scene activation, after the staggered commands have had
+        time to land. Unreachable entities are NOT reported here -- the U0xx
+        audit already owns those, and repeating them would bury the finding
+        this check exists for: an entity that IS reachable, DID accept the
+        command, and is still in the wrong state.
+        """
+        scene_name = kwargs.get("scene")
+        expectations = kwargs.get("expectations") or []
+
+        diverged: list[Divergence] = []
+        checked = 0
+        skipped = 0
+
+        for entity_id, group, target in expectations:
+            reachable, actual = self._entity_reachability(entity_id)
+            if not reachable:
+                skipped += 1
+                continue
+            verdict, _entry = self._absence_verdict(entity_id)
+            if verdict == "expected":
+                skipped += 1
+                continue
+
+            checked += 1
+            want = self._expected_text(target)
+            if actual != want:
+                diverged.append(Divergence(entity_id, group, want, actual))
+
+        result = AuditResult(
+            scene=scene_name,
+            when=self._now_text(),
+            checked=checked,
+            skipped=skipped,
+            diverged=diverged,
+        )
+        self._record_audit(result)
+
+        if result.clean:
+            self.log(
+                "[V001] Scene '{}' verified: {} entities in the commanded "
+                "state ({} skipped)".format(scene_name, checked, skipped)
+            )
+        else:
+            self.log(
+                "[V002] Scene '{}' DIVERGED: {} of {} entities not in the "
+                "commanded state -- {}".format(
+                    scene_name,
+                    len(diverged),
+                    checked,
+                    ", ".join(
+                        "{} ({}) wanted {} but is {}".format(
+                            d.entity_id, d.group, d.expected, d.actual
+                        )
+                        for d in diverged
+                    ),
+                ),
+                level="WARNING",
+            )
+        return result
+
+    def _record_audit(self, result: AuditResult):
+        """Keep a bounded history so the daily report has something to read."""
+        self.audit_history.append(result)
+        if len(self.audit_history) > self.audit_history_limit:
+            del self.audit_history[: -self.audit_history_limit]
+
+    def _now_text(self) -> str:
+        try:
+            return self.get_now().isoformat(timespec="seconds")
+        except Exception:
+            return datetime.datetime.now().isoformat(timespec="seconds")
+
+    def _schedule_verification(
+        self, scene_name: str, entities: list[EntityControl], after: float
+    ):
+        """Check the result once the last staggered command has had time."""
+        if not entities:
+            return
+        delay = max(0.0, after) + self.audit_margin
+        expectations = [(e.entity_id, e.group, e.target_state) for e in entities]
+        self.log(
+            "[V003] Scene '{}': verifying {} entities in {:.0f}s".format(
+                scene_name, len(expectations), delay
+            )
+        )
+        handle = self.run_in(
+            self._verify_scene, delay, scene=scene_name, expectations=expectations
+        )
+        self._pending_timers.append(handle)
+
+    def _daily_light_report(self, kwargs=None) -> dict:
+        """Summarise the day: how many transitions, how many diverged, and where.
+
+        This is the artefact O1 has never had. "The lights behave as expected"
+        stops being an opinion the moment there is a day of transitions with a
+        pass or fail against each one.
+        """
+        today = str(self._today())
+        todays = [r for r in self.audit_history if r.when.startswith(today)]
+
+        if not todays:
+            self.log(
+                "[V004] Daily light report {}: no scene transitions recorded"
+                .format(today),
+                level="WARNING",
+            )
+            return {"date": today, "transitions": 0, "diverged": 0, "offenders": {}}
+
+        bad = [r for r in todays if not r.clean]
+        offenders: dict[str, int] = {}
+        for result in bad:
+            for d in result.diverged:
+                offenders[d.entity_id] = offenders.get(d.entity_id, 0) + 1
+
+        summary = {
+            "date": today,
+            "transitions": len(todays),
+            "diverged": len(bad),
+            "offenders": offenders,
+        }
+
+        if not bad:
+            self.log(
+                "[V005] Daily light report {}: {} transitions, all verified "
+                "clean".format(today, len(todays))
+            )
+            return summary
+
+        self.log(
+            "[V006] Daily light report {}: {} of {} transitions diverged. "
+            "Worst offenders: {}".format(
+                today,
+                len(bad),
+                len(todays),
+                ", ".join(
+                    "{} x{}".format(e, n)
+                    for e, n in sorted(
+                        offenders.items(), key=lambda kv: -kv[1]
+                    )[:5]
+                ),
+            ),
+            level="WARNING",
+        )
+        return summary
 
     def _entity_reachability(self, entity_id: str) -> tuple[bool, str]:
         """Return (reachable, why). `why` is the state, or 'missing'."""
@@ -1102,11 +1349,13 @@ class AutomaticLights(hass.Hass):
             )
             for ec in entities:
                 self._turn_onoff(entity=ec.entity_id, state=ec.target_state)
+            self._schedule_verification(scene_name, entities, 0.0)
         else:
             self.log(
                 "[F005] Staggered control for {} entities".format(len(entities))
             )
-            self._execute_staggered_control(entities)
+            last = self._execute_staggered_control(entities)
+            self._schedule_verification(scene_name, entities, last)
 
     def _collect_scene_entities(self, scene_name: str) -> list[EntityControl]:
         """Collect all entities for a scene with their target states."""
@@ -1140,13 +1389,17 @@ class AutomaticLights(hass.Hass):
 
         return entities
 
-    def _execute_staggered_control(self, entities: list[EntityControl]):
-        """Schedule entity control with randomised area-based staggering."""
+    def _execute_staggered_control(self, entities: list[EntityControl]) -> float:
+        """Schedule entity control with randomised area-based staggering.
+
+        Returns the largest delay scheduled, so the caller knows when the last
+        command will have landed and can verify the result after it.
+        """
         self.log("[G001] Starting staggered control")
 
         if not entities:
             self.log("[G002] No entities to control")
-            return
+            return 0.0
 
         # Group by area
         area_groups: dict[str, list[EntityControl]] = {}
@@ -1158,6 +1411,7 @@ class AutomaticLights(hass.Hass):
         self.log("[G007] Randomised area order: {}".format(areas))
 
         current_delay = 0.0
+        max_delay = 0.0
 
         for area in areas:
             area_entities = area_groups[area]
@@ -1186,6 +1440,7 @@ class AutomaticLights(hass.Hass):
                     state=ec.target_state,
                 )
                 self._pending_timers.append(handle)
+                max_delay = max(max_delay, entity_delay)
 
             if len(areas) > 1:
                 current_delay += random.uniform(
@@ -1193,7 +1448,12 @@ class AutomaticLights(hass.Hass):
                     self.stagger.room_delay_max,
                 )
 
-        self.log("[G013] Staggered control scheduled")
+        self.log(
+            "[G013] Staggered control scheduled, last command in {:.0f}s".format(
+                max_delay
+            )
+        )
+        return max_delay
 
     def _turn_onoff(self, **kwargs):
         """Turn an entity on or off, and be honest about whether it can land."""

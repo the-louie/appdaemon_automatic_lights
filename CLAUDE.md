@@ -61,7 +61,8 @@ All log messages use bracketed codes for traceability:
 - `G0xx` — Staggered control scheduling
 - `H0xx` — Entity on/off control
 - `S0xx` — Sensor reads and transition checks
-- `U0xx` — Reachability audit: entities that cannot respond to a command (U001-U008)
+- `U0xx` — Reachability audit: entities that cannot respond to a command (U001-U013)
+- `V0xx` — Verification: whether a scene's commands actually took effect (V001-V008)
 
 When adding new log lines, follow this convention and use the next available code in the appropriate range.
 
@@ -99,6 +100,37 @@ Entries require both a `reason` and a `review` date; a malformed entry is reject
 **not** suppress, which is the safe direction. Past its review date an entry stops
 suppressing and starts warning about itself, so the list cannot silently become permanent.
 
+### The `V0xx` range — did it actually happen
+
+Added 2026-09-03 (S4-06). `U0xx` answers *could this command land*. `V0xx` answers the
+different and harder question: **did it**. After each scene activation the app re-reads
+every entity it commanded and compares against what it asked for.
+
+| code | level | meaning |
+|---|---|---|
+| `V001` | INFO | scene verified, everything in the commanded state |
+| `V002` | WARNING | scene diverged — reachable entities not in the commanded state |
+| `V003` | INFO | verification scheduled, with its delay |
+| `V004` | WARNING | a day with **no scene transitions at all** |
+| `V005` | INFO | daily report, all clean |
+| `V006` | WARNING | daily report, with the worst offenders |
+| `V007` | INFO | daily report scheduled |
+| `V008` | **ERROR** | the daily report could not be scheduled |
+
+**Unreachable entities are skipped here on purpose.** `U0xx` owns them; repeating them
+would bury the finding this exists for — the entity that *is* reachable, *did* accept the
+command, and is still in the wrong state. That is the case nothing has ever caught, and it
+is exactly what a second app writing over the same light looks like (T-40).
+
+**Verification waits for the stagger.** `_execute_staggered_control` now returns the largest
+delay it scheduled, and verification runs `verify_margin_seconds` after that. Checking
+sooner would report every scene as diverged, which is the fastest way to make a signal
+worthless.
+
+**`V004` — a silent day is a warning, not a pass.** No transitions recorded means the
+scheduler never fired, which is a bigger fault than a single light being off, and it is the
+failure mode that would otherwise look identical to success.
+
 **`U008` replaces a success line, it does not add to one.** `_turn_onoff` still issues the
 command to an unreachable entity — a device that comes back should find the right state
 waiting for it — but it no longer logs `H001`/`H002` when the command cannot have landed.
@@ -112,7 +144,7 @@ waiting for it — but it no longer logs `H001`/`H002` when the command cannot h
 ## Configuration keys
 
 Required: `morning_start`, `night_start`, `scenes`
-Optional: `late_morning_start`, `early_night_start`, `solar_radiation` (with `sensor`, `threshold`, `elevation_threshold`), `staggering` (with `light_delay_min/max`, `room_delay_min/max`), `expected_absent` (entity_id -> `reason` + `review`)
+Optional: `late_morning_start`, `early_night_start`, `solar_radiation` (with `sensor`, `threshold`, `elevation_threshold`), `staggering` (with `light_delay_min/max`, `room_delay_min/max`), `expected_absent` (entity_id -> `reason` + `review`), `audit` (with `verify_margin_seconds`, `history`), `audit_daily_report_time`
 
 All time config values are validated at load time via `_parse_time_config` with fallback to defaults.
 

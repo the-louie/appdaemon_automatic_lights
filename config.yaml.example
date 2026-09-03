@@ -30,6 +30,26 @@ automatic_lights:
   # Groups not listed in a scene retain their state from earlier transitions.
   # On init/restart, the app replays all predecessor scenes up to the current
   # state to reconstruct the correct cumulative lighting state.
+  # ── Verification: did the scene actually happen ──────────────────────
+  # After each scene activation the app re-reads every entity it commanded and
+  # compares against what it asked for. A divergence is an entity that is
+  # REACHABLE and accepted the command but is not in the commanded state --
+  # someone used the wall switch, a bulb rejoined mid-stagger, another app
+  # wrote over it. Unreachable entities are not reported here; the U0xx audit
+  # owns those, and repeating them would bury this signal.
+  audit:
+    # How long after the LAST staggered command to check. Scene activation
+    # spreads commands over up to room_delay_max per area, so checking too
+    # early reports every scene as diverged and the signal becomes worthless.
+    verify_margin_seconds: 30
+    # How many results to keep in memory for the daily report.
+    history: 200
+
+  # When to summarise the day. A day with NO transitions is reported as a
+  # warning rather than passing quietly -- no transitions means the scheduler
+  # did not fire, which is a bigger fault than one light being off.
+  audit_daily_report_time: "23:55:00"
+
   # ── Expected absences ────────────────────────────────────────────────
   # Entities that are SUPPOSED to be unavailable, so the reachability audit
   # (U0xx) does not warn about them. Both keys are required and neither is
