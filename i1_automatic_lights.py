@@ -52,7 +52,8 @@ NO_TRANSITION_LOG_INTERVAL = 15  # Log every Nth no-transition check (~15 min)
 # that a command sent to that entity will not turn anything on. `None` from
 # get_state is handled separately: a missing entity is a config error, an
 # unavailable one is usually a flat battery or a device off the network.
-HA_UNAVAILABLE_STATES = frozenset({"unavailable", "unknown", ""})
+# The set itself is shared estate-wide since S7-07 (T-06): see ha_states.py.
+from ha_states import HA_UNAVAILABLE_STATES  # noqa: E402
 
 
 @dataclass
