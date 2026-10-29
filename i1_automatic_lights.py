@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import appdaemon.plugins.hass.hassapi as hass
 
+import irisone_bus
 import notification_policy as policy
 
 # Configuration defaults
@@ -181,6 +182,11 @@ class AutomaticLights(hass.Hass):
     def initialize(self):
         """Initialize the app."""
         self.log("[A001] Starting initialization")
+        # A-71.5: an older shared module winning AppDaemon's import path must stop
+        # the app here, where the watchdog sees it, not at the first divergence.
+        if not hasattr(policy, "should_notify") or not hasattr(irisone_bus, "presence_for_target"):
+            raise RuntimeError("stale shared module on the import path: {}, {}".format(
+                policy.__file__, irisone_bus.__file__))
 
         self._load_config()
         self._setup_groups_and_areas()
@@ -687,8 +693,16 @@ class AutomaticLights(hass.Hass):
         ]
         body = "Scene '{}':\n{}".format(result.scene, "\n".join(lines))
 
+        # URGENT (owner, IQ-18 2026-10-29): the household lives with a light that
+        # did not obey. The gate never drops it; it is called so the class is
+        # stated (IQ-12) and counted (IQ-28). Never dropping is also why apply()'s
+        # mark above needs no uncommit here.
+        domain = self.get_state(irisone_bus.DOMAIN)
         sent = []
         for target in self.notify_targets:
+            in_home, _ = irisone_bus.presence_for_target(domain, target, now_epoch)
+            _, gate_reason = policy.should_notify(policy.URGENT, in_home)
+            self._report_gate(",".join(sorted(sending)), target, gate_reason)
             try:
                 self.call_service(
                     "notify/{}".format(target),
@@ -711,6 +725,16 @@ class AutomaticLights(hass.Hass):
             )
         )
         return sent
+
+    def _report_gate(self, key: str, target: str, reason: str) -> None:
+        """Count the decision in irisone.notify_gate_stats (IQ-28). Never blocks a send."""
+        try:
+            self.fire_event(irisone_bus.GATE_EVENT, **irisone_bus.gate_event(
+                self.name, key, target, policy.URGENT, True, reason))
+        except Exception as exc:  # the counter is evidence, not a dependency
+            if isinstance(exc, (TypeError, AttributeError, NameError)):
+                raise
+            self.log("[N007] Could not report gate decision: {}".format(exc), level="WARNING")
 
     def _now_epoch(self) -> float:
         """Epoch seconds. Note .timestamp(), not datetime subtraction: two
