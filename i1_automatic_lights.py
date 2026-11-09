@@ -1419,7 +1419,7 @@ class AutomaticLights(hass.Hass):
         # skipped in _calculate_state because the sun is already up. The scheduled
         # callbacks handle the morning scene activation at runtime.
         if now >= sunrise and now < sunset:
-            return "day"
+            return self._daytime_state(now, late_morning_start, early_night_start)
         if now >= sunset:
             # Handle night_start at or past midnight (e.g., 00:00):
             # when night_start <= sunset, evening/early_night runs from sunset until midnight
@@ -1429,6 +1429,54 @@ class AutomaticLights(hass.Hass):
                 return "evening"
             return "night"
         return "night"
+
+    def _daytime_state(
+        self,
+        now: datetime.time,
+        late_morning_start: datetime.time | None,
+        early_night_start: datetime.time | None,
+    ) -> str:
+        """State between sunrise and sunset, by the same rule the live transitions use.
+
+        Sunrise alone is not "day": the running app leaves morning only when the sun is
+        above the elevation threshold and, with a solar sensor, the light is above its
+        threshold too. On 2026-11-09 an HA restart at 08:21 re-initialised the app 1 h after
+        sunrise at 3.3 W/m2 (threshold 30); the clock-only rule chose "day" and turned 20
+        lights off in a dark house. Without sun or sensor data this falls back to "day".
+        """
+        elevation = self._get_sun_elevation()
+        rising = self._get_sun_rising()
+        light = self._get_solar_radiation() if self.solar.is_enabled else None
+        if elevation is None or rising is None or (self.solar.is_enabled and light is None):
+            self.log("[S008] Init: sun or light data missing, assuming 'day'")
+            return "day"
+        elev_ok = elevation > self.solar.elevation_threshold
+        light_ok = light is None or light > self.solar.threshold
+        if rising:
+            # Mirrors _process_*_transitions: morning/late_morning -> day.
+            state = "day" if elev_ok and light_ok else (
+                "late_morning"
+                if late_morning_start and now >= late_morning_start
+                else "morning"
+            )
+        else:
+            # Mirrors day -> evening (light below threshold or sun below threshold).
+            dark = elevation < self.solar.elevation_threshold or (
+                light is not None and light < self.solar.threshold
+            )
+            state = "day"
+            if dark:
+                state = (
+                    "early_night"
+                    if early_night_start and now >= early_night_start
+                    else "evening"
+                )
+        self.log(
+            "[S008] Init after sunrise: state={}, elev={:.1f}, rising={}, light={}".format(
+                state, elevation, rising, "n/a" if light is None else "{:.1f}".format(light)
+            )
+        )
+        return state
 
     # ── Scene activation ───────────────────────────────────────────
 
